@@ -5,9 +5,9 @@
  *   - Execute as: Me
  *   - Who has access: Anyone
  *
- * DEFAULT_SERVER_URL is used when the client does not specify a serverUrl.
- * When multiple Backend Servers (Render / SnappDeploy / Oracle) are configured
- * in the Python client, the client passes serverUrl dynamically for auto-failover.
+ * IMPORTANT: After editing this code, click:
+ *   Deploy -> Manage deployments -> Edit (pencil) -> Version: New version -> Deploy
+ * Otherwise your /exec URL will keep running the old version!
  */
 
 const DEFAULT_SERVER_URL = "https://your-app.onrender.com/tunnel";
@@ -23,11 +23,14 @@ function doGet(e) {
   return jsonResponse({
     ok: true,
     service: "FreeDnet GAS Relay",
+    version: 2,
+    defaultServerUrl: DEFAULT_SERVER_URL,
     ts: Date.now()
   });
 }
 
 function doPost(e) {
+  let targetUrl = DEFAULT_SERVER_URL;
   try {
     if (!e || !e.postData || !e.postData.contents) {
       return jsonResponse({ ok: false, error: "Empty request body" });
@@ -38,7 +41,7 @@ function doPost(e) {
       return jsonResponse({ ok: false, error: "Unauthorized" });
     }
 
-    const targetUrl = normalizeTunnelUrl(payload.serverUrl);
+    targetUrl = normalizeTunnelUrl(payload.serverUrl);
 
     const options = {
       method: "post",
@@ -58,10 +61,20 @@ function doPost(e) {
       return jsonResponse({
         ok: false,
         upstreamError: true,
+        relayedTo: targetUrl,
         statusCode: code,
         error: "Upstream HTTP " + code,
         detail: text ? text.slice(0, 300) : ""
       });
+    }
+
+    // Attach relayedTo for ping diagnostics
+    if (payload.action === "ping") {
+      try {
+        const parsed = JSON.parse(text);
+        parsed.relayedTo = targetUrl;
+        return jsonResponse(parsed);
+      } catch (_) {}
     }
 
     return ContentService
@@ -71,6 +84,7 @@ function doPost(e) {
     return jsonResponse({
       ok: false,
       upstreamError: true,
+      relayedTo: targetUrl,
       error: err && err.message ? err.message : String(err)
     });
   }
