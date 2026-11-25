@@ -551,6 +551,8 @@ class FreeDnetProxyServer:
                 return
 
             host, port = target
+            proto = "SOCKS5" if is_socks5 else "HTTP"
+            self.log(f"{proto} -> {host}:{port}")
             init_b64 = base64.b64encode(initial_data).decode("ascii") if initial_data else ""
             if initial_data:
                 with self._stat_lock:
@@ -610,6 +612,8 @@ class FreeDnetProxyServer:
 
         req = self._recv_exact(sock, 4)
         if not req or req[1] != 0x01:
+            if req and req[1] == 0x03:
+                self.log("SOCKS5 UDP Associate ignored (TCP only)")
             sock.sendall(b"\x05\x07\x00\x01\x00\x00\x00\x00\x00\x00")
             return None
 
@@ -683,6 +687,7 @@ class FreeDnetProxyServer:
     def _relay_loop(self, client_sock: socket.socket, session_id: str, pinned_backend: BackendServer | None):
         prev_had_rx = False
         idle_cycles = 0
+        last_data_ts = time.time()
         while self.running:
             client_sock.settimeout(0.008 if prev_had_rx else 0.05)
             outgoing = b""
@@ -699,6 +704,7 @@ class FreeDnetProxyServer:
 
             if outgoing:
                 idle_cycles = 0
+                last_data_ts = time.time()
                 with self._stat_lock:
                     self.tx_bytes += len(outgoing)
                 b64_in = base64.b64encode(outgoing).decode("ascii")
@@ -709,9 +715,15 @@ class FreeDnetProxyServer:
                 b64_in = ""
                 wait_ms = 0
             else:
+                if time.time() - last_data_ts > 90:
+                    return
                 idle_cycles += 1
                 b64_in = ""
-                wait_ms = 2500 if idle_cycles == 1 else (5000 if idle_cycles == 2 else 9000)
+                # Keep wait_ms shorter when tunnels are busy so slots don't starve
+                if self.active_tunnels > 6:
+                    wait_ms = 1200
+                else:
+                    wait_ms = 2000 if idle_cycles == 1 else (4000 if idle_cycles == 2 else 6000)
 
             res = self._send_request(
                 "sync",
@@ -726,6 +738,7 @@ class FreeDnetProxyServer:
             prev_had_rx = len(raw_out) > 0
             if raw_out:
                 idle_cycles = 0
+                last_data_ts = time.time()
                 try:
                     client_sock.sendall(raw_out)
                     with self._stat_lock:
