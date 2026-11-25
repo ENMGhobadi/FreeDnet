@@ -702,7 +702,8 @@ class FreeDnetProxyServer:
                 with self._stat_lock:
                     self.tx_bytes += len(outgoing)
                 b64_in = base64.b64encode(outgoing).decode("ascii")
-                wait_ms = 0
+                # Wait briefly (up to 600ms) so fast target replies return in the same GAS roundtrip
+                wait_ms = 600
             elif prev_had_rx:
                 idle_cycles = 0
                 b64_in = ""
