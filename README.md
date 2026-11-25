@@ -44,15 +44,31 @@
 6. در پایین صفحه روی دکمه سفید **Deploy web service** کلیک کنید و ۱ تا ۲ دقیقه صبر کنید تا وضعیت **Live** شود.
 7. لینک بالای صفحه (مثلاً `https://freednet.onrender.com`) آدرس سرور شماست.
 
-#### روش ب) دیپلوی روی SnappDeploy یا سرور شخصی (Oracle / VPS با Docker)
-- **در SnappDeploy:** مخزن `ENMGhobadi/FreeDnet` را متصل کنید، متغیر محیطی `AUTH_KEY` را ست کنید و پورت را روی `3000` بگذارید (فایل `Dockerfile` آماده است).
-- **در سرور شخصی (Oracle / Ubuntu):**
-  ```bash
-  git clone https://github.com/ENMGhobadi/FreeDnet.git
-  cd FreeDnet
-  docker build -t freednet .
-  docker run -d --name freednet -p 3000:3000 -e AUTH_KEY="MySecretKey2026" --restart unless-stopped freednet
-  ```
+#### روش ب) دیپلوی رایگان روی SnappDeploy (مطابق پنل SnappDeploy)
+1. وارد پنل **SnappDeploy** شوید و در داشبورد روی **Connect GitHub** (یا دکمه **+ Deploy** و سپس **Deploy from GitHub →**) کلیک کنید.
+2. در پنجره **Deploy Your Application** موارد زیر را انتخاب کنید:
+   - **Select Repository:** `ENMGhobadi/FreeDnet`
+   - **Deploy Branch:** `main`
+   - **Container Name:** یک نام دلخواه (مثلاً `freednet`) — آدرس نهایی شما زیر همین کادر نمایش داده می‌شود (مثلاً `https://freednet-xxxx.containers.snapdeploy.app`).
+   - **Compute Type:** `CPU` (`Standard compute - Free with auto-sleep`)
+   - **Container Size:** `Small` (`512 MB / 0.25 vCPU` — رایگان)
+   - تیک **Auto Deploy on Push** را روشن بگذارید و روی **Deploy from GitHub** کلیک کنید.
+3. در پنجره **Port Configuration**:
+   - پورت **3000** به‌صورت خودکار از `Dockerfile` شناسایی شده است؛ روی **✓ Continue** کلیک کنید.
+4. در پنجره **Environment Variables Detected** مقادیر زیر را وارد کنید:
+   - **AUTH_KEY** *(Required)*: رمز امن و دلخواه خود (مثلاً `MySecretKey2026`).
+   - **SESSION_IDLE_MS** *(Required)*: عدد **`300000`** را وارد کنید (معادل ۵ دقیقه برای پاکسازی نشست‌های بیکار).
+   - **NODE_ENV:** مقدار `production` را بگذارید.
+   - **PORT = 3000:** از `Dockerfile` خوانده شده و نیازی به Override ندارد.
+5. روی دکمه **Deploy** کلیک کنید و صبر کنید تا کانتینر آماده شود.
+
+#### روش ج) دیپلوی روی سرور شخصی (Oracle / VPS با Docker)
+```bash
+git clone https://github.com/ENMGhobadi/FreeDnet.git
+cd FreeDnet
+docker build -t freednet .
+docker run -d --name freednet -p 3000:3000 -e AUTH_KEY="MySecretKey2026" --restart unless-stopped freednet
+```
 
 ---
 
@@ -96,7 +112,7 @@
 5. در تب **Google Apps Script Accounts**:
    - روی **+ Add GAS Account** بزنید، یک نام دلخواه (مثلاً `GAS 1`) و لینک `/exec` مرحله ۲ را وارد کنید. بقیه اکانت‌ها را هم اضافه کنید.
 6. در تب **Backend Servers (Render / SnappDeploy / Oracle)**:
-   - روی **+ Add Server** بزنید و آدرس سرورهای خود (مثلاً `https://freednet.onrender.com`) را اضافه کنید. این کار هم برای حالت **Direct** و هم برای سوئیچ خودکار (**Auto-Failover**) در حالت **GAS** استفاده می‌شود.
+   - روی **+ Add Server** بزنید و آدرس سرورهای خود (مثلاً `https://freednet.onrender.com` یا `https://freednet-xxxx.containers.snapdeploy.app`) را اضافه کنید. این کار هم برای حالت **Direct** و هم برای سوئیچ خودکار (**Auto-Failover**) در حالت **GAS** استفاده می‌شود.
 7. از بالای پنجره روی **Ping All** بزنید و در کادر **Activity Log** مطمئن شوید وضعیت اکانت‌ها و سرورها `OK` است.
 8. روی دکمه آبی **Start Proxy** کلیک کنید تا وضعیت به `Running` تغییر کند.
 9. روی **Test Proxy (E2E)** بزنید؛ اگر پیام `E2E Proxy Test OK ... (HTTP/1.1 204 No Content)` را دیدید، تونل شما کاملاً آماده است!
