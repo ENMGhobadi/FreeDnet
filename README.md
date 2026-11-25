@@ -26,23 +26,23 @@
 
 می‌توانید یک یا چند سرور بسازید تا در صورت از کار افتادن یکی، برنامه به‌صورت خودکار روی دیگری سوئیچ کند.
 
-#### روش الف) دیپلوی رایگان روی Render
+#### روش الف) دیپلوی رایگان روی Render (مطابق پنل جدید Render)
 1. وارد [داشبورد Render](https://dashboard.render.com/) شوید و ثبت‌نام یا ورود کنید.
-2. از بالا روی **New +** کلیک کنید و گزینه **Web Service** را انتخاب کنید.
-3. مخزن گیت‌هاب خود (`ENMGhobadi/FreeDnet`) را متصل و انتخاب کنید.
-4. تنظیمات زیر را دقیقاً وارد کنید:
-   - **Name:** یک نام دلخواه (مثلاً `freednet-srv1`)
-   - **Region:** نزدیک‌ترین یا آزادترین ریجن (مثلاً `Frankfurt` یا `Singapore`)
+2. از بالا روی **+ New** کلیک کنید و گزینه **Web Service** را انتخاب کنید.
+3. در بخش **Source Code** مخزن گیت‌هاب خود (`ENMGhobadi / FreeDnet`) را انتخاب کنید.
+4. فیلدهای فرم را دقیقاً مطابق زیر پر کنید:
+   - **Name:** یک نام یکتا بنویسید (مثلاً `FreeDnet`).
+   - **Language:** گزینه **Docker** را انتخاب کنید (ساده‌ترین حالت؛ نیازی به وارد کردن Build/Start Command نیست).
+     *(اگر **Node** را انتخاب کردید، در کادر اول `npm install` و در کادر دوم `node server.js` بنویسید؛ مقدار پیش‌فرض `yarn install` / `yarn start` هم کار می‌کند.)*
    - **Branch:** `main`
-   - **Runtime:** `Node` (یا `Docker`)
-   - **Build Command:** `npm install` (اگر `Node` انتخاب کردید)
-   - **Start Command:** `node server.js`
-   - **Instance Type:** `Free`
-5. به پایین صفحه بروید و در بخش **Environment Variables** روی **Add Environment Variable** بزنید:
+   - **Region:** یک ریجن انتخاب کنید (مثلاً `Ohio (US East)` یا `Frankfurt (EU Central)`).
+   - **Root Directory (Optional):** **خالی بگذارید** (چیزی ننویسید).
+   - **Compute:** پلن رایگان **`$0 / month`** (`0.1 CPU`, `512 MB RAM`) را انتخاب کنید.
+5. کمی پایین‌تر در بخش **Environment Variables** روی **Add Environment Variable** بزنید:
    - **Key:** `AUTH_KEY`
    - **Value:** یک رمز امن و دلخواه بنویسید (مثلاً `MySecretKey2026`) — **این رمز را یادداشت کنید.**
-6. روی **Create Web Service** کلیک کنید و حدود ۱ تا ۲ دقیقه صبر کنید تا وضعیت **Live** شود.
-7. آدرس بالای صفحه (مثلاً `https://freednet-srv1.onrender.com`) آدرس سرور شماست.
+6. در پایین صفحه روی دکمه سفید **Deploy web service** کلیک کنید و ۱ تا ۲ دقیقه صبر کنید تا وضعیت **Live** شود.
+7. لینک بالای صفحه (مثلاً `https://freednet.onrender.com`) آدرس سرور شماست.
 
 #### روش ب) دیپلوی روی SnappDeploy یا سرور شخصی (Oracle / VPS با Docker)
 - **در SnappDeploy:** مخزن `ENMGhobadi/FreeDnet` را متصل کنید، متغیر محیطی `AUTH_KEY` را ست کنید و پورت را روی `3000` بگذارید (فایل `Dockerfile` آماده است).
@@ -65,7 +65,7 @@
 3. کد پیش‌فرض داخل ادیتور (`Code.gs`) را کامل پاک کنید و تمام محتوای فایل [`gas/Code.gs`](https://github.com/ENMGhobadi/FreeDnet/blob/main/gas/Code.gs) را داخل آن قرار دهید.
 4. دو خط بالای کد را مطابق مرحله ۱ ویرایش کنید:
    ```javascript
-   const DEFAULT_SERVER_URL = "https://freednet-srv1.onrender.com/tunnel";
+   const DEFAULT_SERVER_URL = "https://freednet.onrender.com/tunnel";
    const AUTH_KEY = "MySecretKey2026";
    ```
    *(دقت کنید که `/tunnel` در انتهای آدرس سرور باشد و `AUTH_KEY` دقیقاً با رمز مرحله ۱ یکی باشد.)*
@@ -96,7 +96,7 @@
 5. در تب **Google Apps Script Accounts**:
    - روی **+ Add GAS Account** بزنید، یک نام دلخواه (مثلاً `GAS 1`) و لینک `/exec` مرحله ۲ را وارد کنید. بقیه اکانت‌ها را هم اضافه کنید.
 6. در تب **Backend Servers (Render / SnappDeploy / Oracle)**:
-   - روی **+ Add Server** بزنید و آدرس سرورهای خود (مثلاً `https://freednet-srv1.onrender.com`) را اضافه کنید. این کار هم برای حالت **Direct** و هم برای سوئیچ خودکار (**Auto-Failover**) در حالت **GAS** استفاده می‌شود.
+   - روی **+ Add Server** بزنید و آدرس سرورهای خود (مثلاً `https://freednet.onrender.com`) را اضافه کنید. این کار هم برای حالت **Direct** و هم برای سوئیچ خودکار (**Auto-Failover**) در حالت **GAS** استفاده می‌شود.
 7. از بالای پنجره روی **Ping All** بزنید و در کادر **Activity Log** مطمئن شوید وضعیت اکانت‌ها و سرورها `OK` است.
 8. روی دکمه آبی **Start Proxy** کلیک کنید تا وضعیت به `Running` تغییر کند.
 9. روی **Test Proxy (E2E)** بزنید؛ اگر پیام `E2E Proxy Test OK ... (HTTP/1.1 204 No Content)` را دیدید، تونل شما کاملاً آماده است!
