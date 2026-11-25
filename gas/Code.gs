@@ -5,12 +5,19 @@
  *   - Execute as: Me
  *   - Who has access: Anyone
  *
- * Set SERVER_URL to your Render / SnappDeploy / Oracle / Cloudflare Worker URL + "/tunnel"
- * Set AUTH_KEY to match the AUTH_KEY environment variable on your server and in the Python client.
+ * DEFAULT_SERVER_URL is used when the client does not specify a serverUrl.
+ * When multiple Backend Servers (Render / SnappDeploy / Oracle) are configured
+ * in the Python client, the client passes serverUrl dynamically for auto-failover.
  */
 
-const SERVER_URL = "https://your-app.onrender.com/tunnel";
+const DEFAULT_SERVER_URL = "https://your-app.onrender.com/tunnel";
 const AUTH_KEY = "change-me-freednet-key";
+
+function normalizeTunnelUrl(rawUrl) {
+  const trimmed = String(rawUrl || "").trim().replace(/\/+$/, "");
+  if (!trimmed) return DEFAULT_SERVER_URL;
+  return trimmed.endsWith("/tunnel") ? trimmed : trimmed + "/tunnel";
+}
 
 function doGet(e) {
   return jsonResponse({
@@ -31,6 +38,8 @@ function doPost(e) {
       return jsonResponse({ ok: false, error: "Unauthorized" });
     }
 
+    const targetUrl = normalizeTunnelUrl(payload.serverUrl);
+
     const options = {
       method: "post",
       contentType: "application/json",
@@ -41,13 +50,15 @@ function doPost(e) {
       muteHttpExceptions: true
     };
 
-    const response = UrlFetchApp.fetch(SERVER_URL, options);
+    const response = UrlFetchApp.fetch(targetUrl, options);
     const code = response.getResponseCode();
     const text = response.getContentText();
 
     if (code < 200 || code >= 300) {
       return jsonResponse({
         ok: false,
+        upstreamError: true,
+        statusCode: code,
         error: "Upstream HTTP " + code,
         detail: text ? text.slice(0, 300) : ""
       });
@@ -59,6 +70,7 @@ function doPost(e) {
   } catch (err) {
     return jsonResponse({
       ok: false,
+      upstreamError: true,
       error: err && err.message ? err.message : String(err)
     });
   }
