@@ -36,6 +36,7 @@ DEFAULT_CONFIG = {
     "listen_port": 1080,
     "route_mode": "gas",  # "gas" or "direct"
     "selected_server": "auto",  # "auto" (Priority + Failover) or specific server name
+    "keep_awake": True,
     "max_concurrent_per_account": 20,
     "daily_limit_per_account": 18000,
     "max_rpm_per_account": 120,
@@ -141,7 +142,6 @@ class ServerPool:
                 if pinned:
                     return pinned
 
-            # Priority order (#1 -> #2 -> #3): healthy servers first, preserving list order
             healthy = [s for s in enabled if now >= s.cooldown_until]
             cooldown = sorted([s for s in enabled if now < s.cooldown_until], key=lambda s: s.cooldown_until)
             return healthy + cooldown
@@ -430,6 +430,7 @@ class FreeDnetProxyServer:
         port: int,
         log_fn,
         route_mode: str = "gas",
+        keep_awake: bool = True,
     ):
         self.pool = pool
         self.server_pool = server_pool
@@ -438,6 +439,7 @@ class FreeDnetProxyServer:
         self.port = port
         self.log = log_fn
         self.route_mode = route_mode  # "gas" or "direct"
+        self.keep_awake = keep_awake
 
         self.running = False
         self.server_sock = None
@@ -454,6 +456,7 @@ class FreeDnetProxyServer:
         self.server_sock.settimeout(1.0)
         self.running = True
         threading.Thread(target=self._accept_loop, daemon=True).start()
+        threading.Thread(target=self._keep_awake_loop, daemon=True).start()
         mode_lbl = "Direct -> Backend" if self.route_mode == "direct" else "Via Google Apps Script"
         target_lbl = self.server_pool.selected_server
         self.log(f"Proxy listening on {self.host}:{self.port} [{mode_lbl} | Target: {target_lbl}]")
@@ -548,6 +551,35 @@ class FreeDnetProxyServer:
             if not res.get("upstreamError"):
                 break
         return last_res, None
+
+    def _keep_awake_loop(self):
+        """Pings only the Priority #1 backend server every 10 minutes so it never sleeps."""
+        interval = 600
+        elapsed = 0
+        while self.running:
+            time.sleep(2)
+            elapsed += 2
+            if not self.running:
+                break
+            if elapsed < interval:
+                continue
+            elapsed = 0
+            if not self.keep_awake:
+                continue
+            try:
+                cands = self.server_pool.get_candidates(require_explicit=(self.route_mode == "direct"))
+                top = cands[0] if cands else None
+                if top is None:
+                    continue
+                t0 = time.time()
+                res = self._send_request("ping", {}, backend=top, retries=0)
+                lat = int((time.time() - t0) * 1000)
+                if res.get("ok"):
+                    self.log(f"Keep-Awake OK [{top.name}]: {lat} ms")
+                else:
+                    self.log(f"Keep-Awake FAILED [{top.name}]: {res.get('error')}")
+            except Exception:
+                pass
 
     def _accept_loop(self):
         while self.running and self.server_sock:
@@ -865,8 +897,8 @@ if HAS_TK:
         def __init__(self, root: tk.Tk):
             self.root = root
             self.root.title("FreeDnet Client — Direct / Multi-GAS & Priority Multi-Server Failover")
-            self.root.geometry("1000x760")
-            self.root.minsize(880, 650)
+            self.root.geometry("1020x760")
+            self.root.minsize(900, 650)
             self.root.configure(bg=self.BG)
 
             self.config = self._load_config()
@@ -925,6 +957,7 @@ if HAS_TK:
             self.config["listen_host"] = self.host_var.get().strip() or "127.0.0.1"
             self.config["route_mode"] = self.route_var.get()
             self.config["selected_server"] = self.server_pool.selected_server
+            self.config["keep_awake"] = bool(self.keep_awake_var.get())
             try:
                 self.config["listen_port"] = int(self.port_var.get().strip())
             except ValueError:
@@ -1044,7 +1077,7 @@ if HAS_TK:
             self.target_combo.grid(row=1, column=5, columnspan=3, sticky="w", padx=4)
             self.target_combo.bind("<<ComboboxSelected>>", self._on_target_change)
 
-            # Row 2: Auth & Listen
+            # Row 2: Auth, Listen & Keep Awake
             ttk.Label(cfg_card, text="Auth Key:", style="Card.TLabel").grid(row=2, column=0, sticky="w", padx=(0, 6), pady=4)
             self.auth_var = tk.StringVar(value=self.config["auth_key"])
             self.auth_entry = ttk.Entry(cfg_card, textvariable=self.auth_var, show="*", width=26)
@@ -1068,6 +1101,14 @@ if HAS_TK:
             ttk.Label(cfg_card, text="Port:", style="Card.TLabel").grid(row=2, column=5, sticky="w", padx=(10, 4))
             self.port_var = tk.StringVar(value=str(self.config["listen_port"]))
             ttk.Entry(cfg_card, textvariable=self.port_var, width=7).grid(row=2, column=6, sticky="w", padx=4)
+
+            self.keep_awake_var = tk.BooleanVar(value=bool(self.config.get("keep_awake", True)))
+            ttk.Checkbutton(
+                cfg_card,
+                text="Keep #1 Awake (10m)",
+                variable=self.keep_awake_var,
+                command=self._on_keep_awake_change,
+            ).grid(row=2, column=7, sticky="w", padx=6)
 
             # Row 3: GAS Quota Limits
             ttk.Label(cfg_card, text="Max Concurrent:", style="Card.TLabel").grid(row=3, column=0, sticky="w", padx=(0, 6), pady=4)
@@ -1171,7 +1212,7 @@ if HAS_TK:
             ttk.Label(log_hdr, text="Activity Log", style="Section.TLabel").pack(side="left")
             ttk.Label(
                 log_hdr,
-                text="Free Render/SnappDeploy sleep after 15m idle and take ~45s to wake on first ping.",
+                text="Keep #1 Awake pings Priority #1 every 10m while proxy is running.",
                 style="Muted.TLabel",
             ).pack(side="right")
 
@@ -1223,6 +1264,13 @@ if HAS_TK:
                 self.server_pool.set_selected_server(val[6:])
             self._save_config()
             self.log(f"Backend Target set to: {val}")
+
+        def _on_keep_awake_change(self):
+            val = bool(self.keep_awake_var.get())
+            self._save_config()
+            if self.proxy and self.proxy.running:
+                self.proxy.keep_awake = val
+                self.log(f"Keep #1 Awake {'enabled' if val else 'disabled'}.")
 
         def _on_route_change(self):
             mode = self.route_var.get()
@@ -1505,6 +1553,7 @@ if HAS_TK:
                     port=self.config["listen_port"],
                     log_fn=self.log,
                     route_mode=mode,
+                    keep_awake=bool(self.keep_awake_var.get()),
                 )
                 self.proxy.start()
                 mode_lbl = "Direct" if mode == "direct" else "GAS"
