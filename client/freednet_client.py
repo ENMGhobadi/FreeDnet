@@ -736,6 +736,45 @@ class FreeDnetProxyServer:
                 return
 
 
+def bind_universal_clipboard(widget):
+    """
+    Fixes Ctrl+V / Ctrl+C / Ctrl+X / Ctrl+A on Windows when Persian/non-English
+    keyboard layout is active (uses physical keycode) and adds a right-click menu.
+    """
+    def on_ctrl_key(event):
+        # Physical Windows virtual keycodes: A=65, C=67, V=86, X=88
+        if event.keycode == 86:
+            widget.event_generate("<<Paste>>")
+            return "break"
+        if event.keycode == 67:
+            widget.event_generate("<<Copy>>")
+            return "break"
+        if event.keycode == 88:
+            widget.event_generate("<<Cut>>")
+            return "break"
+        if event.keycode == 65:
+            widget.select_range(0, "end")
+            widget.icursor("end")
+            return "break"
+
+    widget.bind("<Control-KeyPress>", on_ctrl_key)
+
+    menu = tk.Menu(widget, tearoff=0)
+    menu.add_command(label="Paste", command=lambda: widget.event_generate("<<Paste>>"))
+    menu.add_command(label="Copy", command=lambda: widget.event_generate("<<Copy>>"))
+    menu.add_command(label="Cut", command=lambda: widget.event_generate("<<Cut>>"))
+    menu.add_separator()
+    menu.add_command(label="Select All", command=lambda: (widget.select_range(0, "end"), widget.icursor("end")))
+
+    def show_menu(event):
+        try:
+            menu.tk_popup(event.x_root, event.y_root)
+        finally:
+            menu.grab_release()
+
+    widget.bind("<Button-3>", show_menu)
+
+
 if HAS_TK:
 
     class EntryDialog(simpledialog.Dialog):
@@ -752,11 +791,13 @@ if HAS_TK:
             self.name_var = tk.StringVar(value=self.init_name)
             self.name_entry = ttk.Entry(master, textvariable=self.name_var, width=52)
             self.name_entry.grid(row=0, column=1, padx=8, pady=8)
+            bind_universal_clipboard(self.name_entry)
 
             ttk.Label(master, text=self.url_label).grid(row=1, column=0, sticky="w", padx=8, pady=8)
             self.url_var = tk.StringVar(value=self.init_url)
             self.url_entry = ttk.Entry(master, textvariable=self.url_var, width=52)
             self.url_entry.grid(row=1, column=1, padx=8, pady=8)
+            bind_universal_clipboard(self.url_entry)
             return self.name_entry
 
         def validate(self):
@@ -957,9 +998,17 @@ if HAS_TK:
             self.auth_var = tk.StringVar(value=self.config["auth_key"])
             self.auth_entry = ttk.Entry(cfg_card, textvariable=self.auth_var, show="*", width=26)
             self.auth_entry.grid(row=2, column=1, sticky="w", padx=4, pady=4)
+            bind_universal_clipboard(self.auth_entry)
 
+            auth_act = tk.Frame(cfg_card, bg=self.CARD)
+            auth_act.grid(row=2, column=2, sticky="w", padx=4)
             self.show_key_var = tk.BooleanVar(value=False)
-            ttk.Checkbutton(cfg_card, text="Show", variable=self.show_key_var, command=self._toggle_key).grid(row=2, column=2, padx=6)
+            ttk.Checkbutton(auth_act, text="Show", variable=self.show_key_var, command=self._toggle_key).pack(side="left")
+            tk.Button(
+                auth_act, text="Paste", command=self._paste_auth_key,
+                bg="#e2e8f0", fg=self.TEXT, relief="flat", bd=0, padx=6, pady=2,
+                font=("Segoe UI", 8), cursor="hand2"
+            ).pack(side="left", padx=(4, 0))
 
             ttk.Label(cfg_card, text="Listen IP:", style="Card.TLabel").grid(row=2, column=3, sticky="w", padx=(12, 4))
             self.host_var = tk.StringVar(value=self.config["listen_host"])
@@ -1093,6 +1142,15 @@ if HAS_TK:
 
         def _toggle_key(self):
             self.auth_entry.configure(show="" if self.show_key_var.get() else "*")
+
+        def _paste_auth_key(self):
+            try:
+                clip = self.root.clipboard_get().strip()
+                if clip:
+                    self.auth_var.set(clip)
+                    self.log("Pasted Auth Key from clipboard.")
+            except Exception:
+                messagebox.showwarning("Clipboard Empty", "Nothing to paste from clipboard.")
 
         def _on_route_change(self):
             mode = self.route_var.get()
