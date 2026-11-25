@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-FreeDnet Local Client (Windows 11 Modern GUI + SOCKS5/HTTP Proxy + Direct / Multi-GAS & Multi-Server Failover)
+FreeDnet Local Client (Windows 11 Modern GUI + SOCKS5/HTTP Proxy + Direct / Multi-GAS & Priority Multi-Server Failover)
 Uses only Python 3.8+ standard library.
 """
 
@@ -35,6 +35,7 @@ DEFAULT_CONFIG = {
     "listen_host": "127.0.0.1",
     "listen_port": 1080,
     "route_mode": "gas",  # "gas" or "direct"
+    "selected_server": "auto",  # "auto" (Priority + Failover) or specific server name
     "max_concurrent_per_account": 20,
     "daily_limit_per_account": 18000,
     "max_rpm_per_account": 120,
@@ -59,6 +60,15 @@ def normalize_tunnel_url(raw_url: str) -> str:
     if not trimmed:
         return ""
     return trimmed if trimmed.endswith("/tunnel") else f"{trimmed}/tunnel"
+
+
+def normalize_health_url(raw_url: str) -> str:
+    trimmed = raw_url.strip().rstrip("/")
+    if not trimmed:
+        return ""
+    if trimmed.endswith("/tunnel"):
+        trimmed = trimmed[:-7]
+    return f"{trimmed}/health"
 
 
 class BackendServer:
@@ -91,15 +101,18 @@ class BackendServer:
 
 class ServerPool:
     """
-    Manages multiple backend servers (Render / SnappDeploy / Oracle).
-    Automatically fails over to the next healthy server when one goes down or hits limits.
+    Manages multiple backend servers (Render / SnappDeploy / Oracle) in strict Priority order (#1, #2, #3...).
+    Supports:
+      - Auto mode ("auto"): tries Priority #1 first; fails over to #2, #3 if #1 is down/in cooldown.
+      - Pinned mode ("<Server Name>"): routes strictly to the user-selected server only.
     """
 
     def __init__(self):
         self.lock = threading.Lock()
         self.servers: list[BackendServer] = []
+        self.selected_server: str = "auto"
 
-    def load_servers(self, items: list[dict]):
+    def load_servers(self, items: list[dict], selected_server: str = "auto"):
         with self.lock:
             self.servers = [
                 BackendServer(
@@ -110,6 +123,11 @@ class ServerPool:
                 for i, item in enumerate(items)
                 if item.get("url", "").strip()
             ]
+            self.selected_server = selected_server or "auto"
+
+    def set_selected_server(self, selected: str):
+        with self.lock:
+            self.selected_server = selected or "auto"
 
     def get_candidates(self, require_explicit: bool = False) -> list[BackendServer | None]:
         with self.lock:
@@ -117,12 +135,16 @@ class ServerPool:
             enabled = [s for s in self.servers if s.enabled and s.url]
             if not enabled:
                 return [] if require_explicit else [None]
+
+            if self.selected_server != "auto":
+                pinned = [s for s in enabled if s.name == self.selected_server]
+                if pinned:
+                    return pinned
+
+            # Priority order (#1 -> #2 -> #3): healthy servers first, preserving list order
             healthy = [s for s in enabled if now >= s.cooldown_until]
-            if not healthy:
-                healthy = sorted(enabled, key=lambda s: s.cooldown_until)
-            else:
-                healthy.sort(key=lambda s: (s.consecutive_failures, s.total_requests))
-            return healthy
+            cooldown = sorted([s for s in enabled if now < s.cooldown_until], key=lambda s: s.cooldown_until)
+            return healthy + cooldown
 
     def report_success(self, srv: BackendServer | None, latency_ms: int):
         if srv is None:
@@ -321,7 +343,7 @@ class NoPostRedirectHandler(urllib.request.HTTPRedirectHandler):
 _OPENER = urllib.request.build_opener(NoPostRedirectHandler())
 
 
-def post_to_gas(url: str, payload: dict, timeout: float = 25.0) -> tuple[dict, bool]:
+def post_to_gas(url: str, payload: dict, timeout: float = 30.0) -> tuple[dict, bool]:
     data = json.dumps(payload).encode("utf-8")
     req = urllib.request.Request(
         url,
@@ -336,7 +358,7 @@ def post_to_gas(url: str, payload: dict, timeout: float = 25.0) -> tuple[dict, b
         raw = e.read().decode("utf-8", errors="replace") if e.fp else str(e)
         if e.code == 429 or "too many" in raw.lower():
             return {"ok": False, "error": f"HTTP {e.code} rate limit"}, True
-        return {"ok": False, "error": f"HTTP {e.code}: {raw[:120]}"}, False
+        return {"ok": False, "error": f"HTTP {e.code}: {raw[:160]}"}, False
     except Exception as e:
         return {"ok": False, "error": str(e)}, False
 
@@ -360,16 +382,20 @@ def post_to_gas(url: str, payload: dict, timeout: float = 25.0) -> tuple[dict, b
         parsed = json.loads(raw)
         return parsed, False
     except json.JSONDecodeError:
-        return {"ok": False, "error": f"Invalid JSON from GAS: {raw[:100]}"}, False
+        return {"ok": False, "error": f"Invalid JSON from GAS: {raw[:120]}"}, False
 
 
-def post_direct_to_server(server_url: str, payload: dict, auth_key: str, timeout: float = 25.0) -> dict:
+def post_direct_to_server(server_url: str, payload: dict, auth_key: str, timeout: float = 30.0) -> dict:
     tunnel_url = normalize_tunnel_url(server_url)
     data = json.dumps(payload).encode("utf-8")
     req = urllib.request.Request(
         tunnel_url,
         data=data,
-        headers={"Content-Type": "application/json", "X-Auth-Key": auth_key},
+        headers={
+            "Content-Type": "application/json",
+            "X-Auth-Key": auth_key,
+            "User-Agent": "FreeDnet-Client/1.0",
+        },
         method="POST",
     )
     try:
@@ -384,7 +410,12 @@ def post_direct_to_server(server_url: str, payload: dict, auth_key: str, timeout
                 parsed["upstreamError"] = True
             return parsed
         except Exception:
-            return {"ok": False, "upstreamError": e.code >= 500 or e.code == 429, "error": f"HTTP {e.code}: {raw[:120]}"}
+            return {
+                "ok": False,
+                "upstreamError": e.code >= 500 or e.code == 429,
+                "error": f"HTTP {e.code}",
+                "detail": raw[:180],
+            }
     except Exception as e:
         return {"ok": False, "upstreamError": True, "error": str(e)}
 
@@ -424,7 +455,8 @@ class FreeDnetProxyServer:
         self.running = True
         threading.Thread(target=self._accept_loop, daemon=True).start()
         mode_lbl = "Direct -> Backend" if self.route_mode == "direct" else "Via Google Apps Script"
-        self.log(f"Proxy listening on {self.host}:{self.port} [{mode_lbl}] (SOCKS5 + HTTP)")
+        target_lbl = self.server_pool.selected_server
+        self.log(f"Proxy listening on {self.host}:{self.port} [{mode_lbl} | Target: {target_lbl}]")
 
     def stop(self):
         self.running = False
@@ -445,7 +477,6 @@ class FreeDnetProxyServer:
     ) -> dict:
         payload = {"authKey": self.auth_key, "action": action, **body}
 
-        # Direct Mode: 127.0.0.1:1080 -> Render / SnappDeploy / Oracle directly
         if self.route_mode == "direct":
             if backend is None:
                 return {"ok": False, "error": "No backend server configured for Direct mode", "upstreamError": True}
@@ -459,7 +490,6 @@ class FreeDnetProxyServer:
                 self.server_pool.report_failure(backend, res.get("error", "Upstream error"))
             return res
 
-        # GAS Mode: 127.0.0.1:1080 -> GAS Accounts (1/N) -> Backend Server
         if backend is not None:
             payload["serverUrl"] = backend.url
 
@@ -486,7 +516,7 @@ class FreeDnetProxyServer:
             if is_upstream_err and backend is not None:
                 self.pool.release(acc, ok=True, latency_ms=lat)
                 self.server_pool.report_failure(backend, last_err)
-                return {"ok": False, "error": last_err, "upstreamError": True}
+                return {"ok": False, "error": last_err, "detail": res.get("detail", ""), "upstreamError": True}
 
             self.pool.release(acc, ok=False, latency_ms=lat, rate_limited=rate_limited, err_msg=last_err)
             excluded.add(acc)
@@ -512,7 +542,8 @@ class FreeDnetProxyServer:
                 return res, srv
             last_res = res
             if srv is not None and len(candidates) > 1 and res.get("upstreamError"):
-                self.log(f"Backend [{srv.name}] failed ({res.get('error')}), failing over...")
+                detail = f" ({res.get('detail', '')[:80]})" if res.get("detail") else ""
+                self.log(f"Backend [{srv.name}] failed ({res.get('error')}{detail}), failing over...")
                 continue
             if not res.get("upstreamError"):
                 break
@@ -708,7 +739,6 @@ class FreeDnetProxyServer:
                 with self._stat_lock:
                     self.tx_bytes += len(outgoing)
                 b64_in = base64.b64encode(outgoing).decode("ascii")
-                # Wait briefly (up to 600ms) so fast target replies return in the same GAS roundtrip
                 wait_ms = 600
             elif prev_had_rx:
                 idle_cycles = 0
@@ -719,7 +749,6 @@ class FreeDnetProxyServer:
                     return
                 idle_cycles += 1
                 b64_in = ""
-                # Keep wait_ms shorter when tunnels are busy so slots don't starve
                 if self.active_tunnels > 6:
                     wait_ms = 1200
                 else:
@@ -751,12 +780,7 @@ class FreeDnetProxyServer:
 
 
 def bind_universal_clipboard(widget):
-    """
-    Fixes Ctrl+V / Ctrl+C / Ctrl+X / Ctrl+A on Windows when Persian/non-English
-    keyboard layout is active (uses physical keycode) and adds a right-click menu.
-    """
     def on_ctrl_key(event):
-        # Physical Windows virtual keycodes: A=65, C=67, V=86, X=88
         if event.keycode == 86:
             widget.event_generate("<<Paste>>")
             return "break"
@@ -836,11 +860,13 @@ if HAS_TK:
         GREEN = "#16a34a"
         RED = "#dc2626"
 
+        AUTO_LABEL = "Auto (Priority + Failover)"
+
         def __init__(self, root: tk.Tk):
             self.root = root
-            self.root.title("FreeDnet Client — Direct / Multi-GAS & Multi-Server Failover")
-            self.root.geometry("980x740")
-            self.root.minsize(860, 640)
+            self.root.title("FreeDnet Client — Direct / Multi-GAS & Priority Multi-Server Failover")
+            self.root.geometry("1000x760")
+            self.root.minsize(880, 650)
             self.root.configure(bg=self.BG)
 
             self.config = self._load_config()
@@ -851,13 +877,17 @@ if HAS_TK:
             )
             self.pool.load_accounts(self.config.get("accounts", []))
             self.server_pool = ServerPool()
-            self.server_pool.load_servers(self.config.get("servers", []))
+            self.server_pool.load_servers(
+                self.config.get("servers", []),
+                selected_server=self.config.get("selected_server", "auto"),
+            )
             self.proxy = None
             self.log_queue = queue.Queue()
             self._last_save_ts = time.time()
 
             self._configure_styles()
             self._build_ui()
+            self._refresh_target_dropdown()
             self._sync_tables()
             self._schedule_ui_tick()
             self.root.protocol("WM_DELETE_WINDOW", self._on_close)
@@ -894,6 +924,7 @@ if HAS_TK:
             self.config["auth_key"] = self.auth_var.get().strip()
             self.config["listen_host"] = self.host_var.get().strip() or "127.0.0.1"
             self.config["route_mode"] = self.route_var.get()
+            self.config["selected_server"] = self.server_pool.selected_server
             try:
                 self.config["listen_port"] = int(self.port_var.get().strip())
             except ValueError:
@@ -955,7 +986,7 @@ if HAS_TK:
             tk.Label(title_box, text="FreeDnet", font=("Segoe UI", 14, "bold"), fg="#ffffff", bg="#0f172a").pack(side="left")
             tk.Label(
                 title_box,
-                text="  Direct / Multi-GAS + Multi-Server Failover",
+                text="  Direct / Multi-GAS + Priority Multi-Server",
                 font=("Segoe UI", 9),
                 fg="#94a3b8",
                 bg="#0f172a",
@@ -983,29 +1014,35 @@ if HAS_TK:
             cfg_card = tk.Frame(main, bg=self.CARD, highlightbackground=self.BORDER, highlightthickness=1, padx=12, pady=10)
             cfg_card.pack(fill="x", pady=(0, 10))
 
-            ttk.Label(cfg_card, text="Connection, Chain Mode & Quota Protection", style="Section.TLabel").grid(
+            ttk.Label(cfg_card, text="Connection, Chain Mode & Backend Target", style="Section.TLabel").grid(
                 row=0, column=0, columnspan=8, sticky="w", pady=(0, 8)
             )
 
-            # Row 1: Route Mode
+            # Row 1: Route Mode + Backend Target Selector
             ttk.Label(cfg_card, text="Chain Mode:", style="Card.TLabel").grid(row=1, column=0, sticky="w", padx=(0, 6), pady=4)
             self.route_var = tk.StringVar(value=self.config.get("route_mode", "gas"))
             mode_frame = tk.Frame(cfg_card, bg=self.CARD)
-            mode_frame.grid(row=1, column=1, columnspan=7, sticky="w", pady=4)
+            mode_frame.grid(row=1, column=1, columnspan=3, sticky="w", pady=4)
             ttk.Radiobutton(
                 mode_frame,
-                text="Via Google Apps Script (Severe Filtering)",
+                text="Via Google Apps Script",
                 variable=self.route_var,
                 value="gas",
                 command=self._on_route_change,
-            ).pack(side="left", padx=(0, 18))
+            ).pack(side="left", padx=(0, 12))
             ttk.Radiobutton(
                 mode_frame,
-                text="Direct to Backend Servers (Fast / No GAS Quota)",
+                text="Direct to Backend",
                 variable=self.route_var,
                 value="direct",
                 command=self._on_route_change,
             ).pack(side="left")
+
+            ttk.Label(cfg_card, text="Backend Target:", style="Card.TLabel").grid(row=1, column=4, sticky="w", padx=(12, 4))
+            self.target_var = tk.StringVar(value=self.AUTO_LABEL)
+            self.target_combo = ttk.Combobox(cfg_card, textvariable=self.target_var, state="readonly", width=28)
+            self.target_combo.grid(row=1, column=5, columnspan=3, sticky="w", padx=4)
+            self.target_combo.bind("<<ComboboxSelected>>", self._on_target_change)
 
             # Row 2: Auth & Listen
             ttk.Label(cfg_card, text="Auth Key:", style="Card.TLabel").grid(row=2, column=0, sticky="w", padx=(0, 6), pady=4)
@@ -1026,11 +1063,11 @@ if HAS_TK:
 
             ttk.Label(cfg_card, text="Listen IP:", style="Card.TLabel").grid(row=2, column=3, sticky="w", padx=(12, 4))
             self.host_var = tk.StringVar(value=self.config["listen_host"])
-            ttk.Entry(cfg_card, textvariable=self.host_var, width=14).grid(row=2, column=4, padx=4)
+            ttk.Entry(cfg_card, textvariable=self.host_var, width=14).grid(row=2, column=4, sticky="w", padx=4)
 
             ttk.Label(cfg_card, text="Port:", style="Card.TLabel").grid(row=2, column=5, sticky="w", padx=(10, 4))
             self.port_var = tk.StringVar(value=str(self.config["listen_port"]))
-            ttk.Entry(cfg_card, textvariable=self.port_var, width=7).grid(row=2, column=6, padx=4)
+            ttk.Entry(cfg_card, textvariable=self.port_var, width=7).grid(row=2, column=6, sticky="w", padx=4)
 
             # Row 3: GAS Quota Limits
             ttk.Label(cfg_card, text="Max Concurrent:", style="Card.TLabel").grid(row=3, column=0, sticky="w", padx=(0, 6), pady=4)
@@ -1049,7 +1086,7 @@ if HAS_TK:
                 row=3, column=6, columnspan=2, sticky="w", padx=6
             )
 
-            # Card 2: Tabbed Pools (GAS Accounts + Backend Servers)
+            # Card 2: Tabbed Pools
             pool_card = tk.Frame(main, bg=self.CARD, highlightbackground=self.BORDER, highlightthickness=1, padx=12, pady=10)
             pool_card.pack(fill="both", expand=True, pady=(0, 10))
 
@@ -1076,7 +1113,7 @@ if HAS_TK:
                 ("daily", "Daily Quota", 110),
                 ("share", "Session %", 75),
                 ("latency", "Latency", 75),
-                ("url", "GAS Web App URL", 290),
+                ("url", "GAS Web App URL", 300),
             ]:
                 self.tree.heading(col, text=text)
                 self.tree.column(col, width=w, anchor="w" if col in ("name", "url") else "center")
@@ -1092,21 +1129,22 @@ if HAS_TK:
             self._make_btn(gas_btns, "Enable / Disable", self.toggle_account).pack(side="left", padx=4)
             self._make_btn(gas_btns, "Remove", self.remove_account).pack(side="left", padx=4)
 
-            # Tab 2: Backend Servers (Render / SnappDeploy / Oracle)
+            # Tab 2: Backend Servers with Priority
             srv_tab = tk.Frame(self.notebook, bg=self.CARD, pady=6)
-            self.notebook.add(srv_tab, text="Backend Servers (Render / SnappDeploy / Oracle)")
+            self.notebook.add(srv_tab, text="Backend Servers (Priority & Failover)")
 
             srv_wrap = tk.Frame(srv_tab, bg=self.CARD)
             srv_wrap.pack(fill="both", expand=True)
-            scols = ("name", "status", "requests", "errors", "latency", "url")
+            scols = ("prio", "name", "status", "requests", "errors", "latency", "url")
             self.srv_tree = ttk.Treeview(srv_wrap, columns=scols, show="headings", height=6)
             for col, text, w in [
-                ("name", "Server Name", 130),
-                ("status", "Status", 105),
-                ("requests", "Requests", 85),
-                ("errors", "Errors", 70),
-                ("latency", "Latency", 85),
-                ("url", "Server URL (e.g. https://app.onrender.com)", 340),
+                ("prio", "Priority", 65),
+                ("name", "Server Name", 140),
+                ("status", "Status", 100),
+                ("requests", "Requests", 80),
+                ("errors", "Errors", 65),
+                ("latency", "Latency", 80),
+                ("url", "Server URL (e.g. https://app.onrender.com)", 320),
             ]:
                 self.srv_tree.heading(col, text=text)
                 self.srv_tree.column(col, width=w, anchor="w" if col in ("name", "url") else "center")
@@ -1120,12 +1158,9 @@ if HAS_TK:
             self._make_btn(srv_btns, "+ Add Server", self.add_server, primary=True).pack(side="left", padx=(0, 6))
             self._make_btn(srv_btns, "Edit", self.edit_server).pack(side="left", padx=4)
             self._make_btn(srv_btns, "Enable / Disable", self.toggle_server).pack(side="left", padx=4)
+            self._make_btn(srv_btns, "▲ Up", lambda: self.move_server(-1)).pack(side="left", padx=4)
+            self._make_btn(srv_btns, "▼ Down", lambda: self.move_server(1)).pack(side="left", padx=4)
             self._make_btn(srv_btns, "Remove", self.remove_server).pack(side="left", padx=4)
-            ttk.Label(
-                srv_btns,
-                text="Used for Direct mode & GAS auto-failover.",
-                style="Muted.TLabel",
-            ).pack(side="right")
 
             # Card 3: Activity Log
             log_card = tk.Frame(main, bg=self.CARD, highlightbackground=self.BORDER, highlightthickness=1, padx=12, pady=10)
@@ -1136,7 +1171,7 @@ if HAS_TK:
             ttk.Label(log_hdr, text="Activity Log", style="Section.TLabel").pack(side="left")
             ttk.Label(
                 log_hdr,
-                text="SOCKS5 / HTTP on 127.0.0.1:1080 — Switch between Direct and GAS chain anytime.",
+                text="Free Render/SnappDeploy sleep after 15m idle and take ~45s to wake on first ping.",
                 style="Muted.TLabel",
             ).pack(side="right")
 
@@ -1165,6 +1200,29 @@ if HAS_TK:
                     self.log("Pasted Auth Key from clipboard.")
             except Exception:
                 messagebox.showwarning("Clipboard Empty", "Nothing to paste from clipboard.")
+
+        def _refresh_target_dropdown(self):
+            options = [self.AUTO_LABEL] + [f"Only: {s.name}" for s in self.server_pool.servers]
+            self.target_combo["values"] = options
+            sel = self.server_pool.selected_server
+            if sel == "auto":
+                self.target_var.set(self.AUTO_LABEL)
+            else:
+                lbl = f"Only: {sel}"
+                if lbl in options:
+                    self.target_var.set(lbl)
+                else:
+                    self.server_pool.set_selected_server("auto")
+                    self.target_var.set(self.AUTO_LABEL)
+
+        def _on_target_change(self, _event=None):
+            val = self.target_var.get()
+            if val == self.AUTO_LABEL:
+                self.server_pool.set_selected_server("auto")
+            elif val.startswith("Only: "):
+                self.server_pool.set_selected_server(val[6:])
+            self._save_config()
+            self.log(f"Backend Target set to: {val}")
 
         def _on_route_change(self):
             mode = self.route_var.get()
@@ -1249,6 +1307,7 @@ if HAS_TK:
                 name, url = dlg.result_data
                 with self.server_pool.lock:
                     self.server_pool.servers.append(BackendServer(name, url, True))
+                self._refresh_target_dropdown()
                 self._save_config()
                 self._sync_tables()
                 self.log(f"Added backend server: {name} ({url})")
@@ -1260,11 +1319,15 @@ if HAS_TK:
             idx = int(sel[0])
             if 0 <= idx < len(self.server_pool.servers):
                 srv = self.server_pool.servers[idx]
+                old_name = srv.name
                 dlg = EntryDialog(
                     self.root, "Edit Backend Server", "Server Name:", "Server URL (https://...):", srv.name, srv.url
                 )
                 if dlg.result_data:
                     srv.name, srv.url = dlg.result_data[0], dlg.result_data[1].rstrip("/")
+                    if self.server_pool.selected_server == old_name:
+                        self.server_pool.set_selected_server(srv.name)
+                    self._refresh_target_dropdown()
                     self._save_config()
                     self._sync_tables()
 
@@ -1276,6 +1339,7 @@ if HAS_TK:
             if 0 <= idx < len(self.server_pool.servers):
                 with self.server_pool.lock:
                     removed = self.server_pool.servers.pop(idx)
+                self._refresh_target_dropdown()
                 self._save_config()
                 self._sync_tables()
                 self.log(f"Removed backend server: {removed.name}")
@@ -1293,6 +1357,23 @@ if HAS_TK:
                 self._save_config()
                 self._sync_tables()
 
+        def move_server(self, delta: int):
+            sel = self.srv_tree.selection()
+            if not sel:
+                return
+            idx = int(sel[0])
+            new_idx = idx + delta
+            with self.server_pool.lock:
+                if 0 <= idx < len(self.server_pool.servers) and 0 <= new_idx < len(self.server_pool.servers):
+                    srvs = self.server_pool.servers
+                    srvs[idx], srvs[new_idx] = srvs[new_idx], srvs[idx]
+                else:
+                    return
+            self._refresh_target_dropdown()
+            self._save_config()
+            self._sync_tables()
+            self.srv_tree.selection_set(str(new_idx))
+
         def test_all_accounts(self):
             self._save_config()
             auth_key = self.auth_var.get().strip()
@@ -1306,14 +1387,15 @@ if HAS_TK:
                 def worker_direct():
                     for srv in list(self.server_pool.servers):
                         t0 = time.time()
-                        res = post_direct_to_server(srv.url, {"authKey": auth_key, "action": "ping"}, auth_key, timeout=15.0)
+                        res = post_direct_to_server(srv.url, {"authKey": auth_key, "action": "ping"}, auth_key, timeout=45.0)
                         lat = int((time.time() - t0) * 1000)
                         if res.get("ok"):
                             self.server_pool.report_success(srv, lat)
                             self.log(f"Direct Ping OK [{srv.name}]: {lat} ms (active: {res.get('activeSessions', 0)})")
                         else:
+                            detail = f" | {res.get('detail')}" if res.get("detail") else ""
                             self.server_pool.report_failure(srv, res.get("error", "Error"))
-                            self.log(f"Direct Ping FAILED [{srv.name}]: {res.get('error')}")
+                            self.log(f"Direct Ping FAILED [{srv.name}]: {res.get('error')}{detail}")
 
                 threading.Thread(target=worker_direct, daemon=True).start()
                 return
@@ -1330,7 +1412,7 @@ if HAS_TK:
                     if srv is not None:
                         payload["serverUrl"] = srv.url
                     t0 = time.time()
-                    res, _ = post_to_gas(acc.url, payload, timeout=15.0)
+                    res, _ = post_to_gas(acc.url, payload, timeout=45.0)
                     lat = int((time.time() - t0) * 1000)
                     if res.get("ok"):
                         acc.last_latency_ms = lat
@@ -1338,22 +1420,24 @@ if HAS_TK:
                         self.log(f"GAS Ping OK [{acc.name}]: {lat} ms")
                     else:
                         acc.last_error = res.get("error", "Error")
-                        self.log(f"GAS Ping FAILED [{acc.name}]: {acc.last_error}")
+                        detail = f" | {res.get('detail')}" if res.get("detail") else ""
+                        self.log(f"GAS Ping FAILED [{acc.name}]: {acc.last_error}{detail}")
 
                 if any(s is not None for s in servers):
                     first_gas = next((a for a in self.pool.accounts if a.enabled), self.pool.accounts[0])
                     for srv in list(self.server_pool.servers):
                         t0 = time.time()
                         res, _ = post_to_gas(
-                            first_gas.url, {"authKey": auth_key, "action": "ping", "serverUrl": srv.url}, timeout=15.0
+                            first_gas.url, {"authKey": auth_key, "action": "ping", "serverUrl": srv.url}, timeout=45.0
                         )
                         lat = int((time.time() - t0) * 1000)
                         if res.get("ok"):
                             self.server_pool.report_success(srv, lat)
                             self.log(f"Backend OK [{srv.name}]: {lat} ms (active: {res.get('activeSessions', 0)})")
                         else:
+                            detail = f" | {res.get('detail')}" if res.get("detail") else ""
                             self.server_pool.report_failure(srv, res.get("error", "Error"))
-                            self.log(f"Backend FAILED [{srv.name}]: {res.get('error')}")
+                            self.log(f"Backend FAILED [{srv.name}]: {res.get('error')}{detail}")
 
             threading.Thread(target=worker, daemon=True).start()
 
@@ -1368,7 +1452,7 @@ if HAS_TK:
             def worker():
                 t0 = time.time()
                 try:
-                    s = socket.create_connection((host, port), timeout=15)
+                    s = socket.create_connection((host, port), timeout=25)
                     s.sendall(b"\x05\x01\x00")
                     if s.recv(2) != b"\x05\x00":
                         raise RuntimeError("SOCKS5 auth negotiation failed")
@@ -1448,10 +1532,10 @@ if HAS_TK:
                 for row in existing_s:
                     self.srv_tree.delete(row)
                 for idx, srv in enumerate(self.server_pool.servers):
-                    self.srv_tree.insert("", "end", iid=str(idx), values=self._srv_row(srv))
+                    self.srv_tree.insert("", "end", iid=str(idx), values=self._srv_row(idx, srv))
             else:
                 for idx, srv in enumerate(self.server_pool.servers):
-                    self.srv_tree.item(str(idx), values=self._srv_row(srv))
+                    self.srv_tree.item(str(idx), values=self._srv_row(idx, srv))
 
         def _gas_row(self, acc: GasAccount, total_reqs: int):
             share = f"{(acc.total_requests / total_reqs * 100):.1f}%" if total_reqs > 0 else "0.0%"
@@ -1466,9 +1550,9 @@ if HAS_TK:
                 acc.url,
             )
 
-        def _srv_row(self, srv: BackendServer):
+        def _srv_row(self, idx: int, srv: BackendServer):
             lat = f"{srv.last_latency_ms} ms" if srv.last_latency_ms > 0 else "-"
-            return (srv.name, srv.status_label, srv.total_requests, srv.errors, lat, srv.url)
+            return (f"#{idx + 1}", srv.name, srv.status_label, srv.total_requests, srv.errors, lat, srv.url)
 
         def _schedule_ui_tick(self):
             while not self.log_queue.empty():
