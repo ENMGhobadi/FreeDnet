@@ -1,12 +1,13 @@
 {
-  "name": "snapdeploy-captcha-diagnostic",
+  "name": "freednet-server",
   "version": "1.0.0",
-  "private": true,
-  "type": "module",
-  "engines": {
-    "node": ">=20"
-  },
+  "description": "FreeDnet HTTP-to-TCP tunnel server for Google Apps Script relay",
+  "main": "server.js",
   "scripts": {
     "start": "node server.js"
-  }
+  },
+  "engines": {
+    "node": ">=18.0.0"
+  },
+  "license": "MIT"
 }

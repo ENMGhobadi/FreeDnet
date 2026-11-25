@@ -1,0 +1,3 @@
+# FreeDnet Client uses only Python 3.8+ standard library modules
+# (tkinter, socket, threading, urllib, ssl, json, base64).
+# No external packages are required.

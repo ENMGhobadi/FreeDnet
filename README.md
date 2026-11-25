@@ -1,36 +1,67 @@
-# SnapDeploy HTTP / CAPTCHA Diagnostic
+# FreeDnet
 
-A small Node.js diagnostic app. It makes exactly one ordinary server-side GET request to each of three hard-coded public destinations:
+تونل عبور از فیلترینگ شدید با استفاده از **سرور ابری (Render / SnappDeploy / Oracle)**، **Google Apps Script** و **کلاینت گرافیکی پایتون (ویندوز ۱۱)** با پشتیبانی از چند اکانت گوگل اسکریپت و تقسیم هوشمند سهمیه.
 
-- https://whatismyipaddress.com/
-- https://www.iplocation.net/
-- https://2ip.io/
+---
 
-It reports status, response timing, a bounded response sample, and common CAPTCHA/challenge markers. It does not solve CAPTCHAs, imitate a browser, rotate identities, accept arbitrary URLs, or forward user traffic.
+## معماری پروژه
 
-## Requirements
-
-- Node.js 20 or newer
-- Set `APP_ACCESS_KEY` as a runtime environment secret. Use a long random value (at least 32 bytes).
-- SnapDeploy supplies `PORT`; the app listens on `0.0.0.0`.
-
-## Run locally
-
-```bash
-npm start
+```text
+[V2Ray / Browser] ---> [127.0.0.1:1080 (Python GUI Client)]
+                             |
+             (تقسیم عادلانه و هوشمند بین اکانت‌ها)
+                             |
+        +--------------------+--------------------+
+        |                    |                    |
+  [GAS Account 1]      [GAS Account 2]      [GAS Account N]
+        |                    |                    |
+        +--------------------+--------------------+
+                             |
+                             v
+           [Node.js Server (Render / SnappDeploy / Oracle)]
+                             |
+                             v
+                       [Free Internet]
 ```
 
-Open `http://localhost:3000`, enter the same `APP_ACCESS_KEY`, and run one test.
+### ساختار فایل‌ها
+- `server.js`, `package.json`, `Dockerfile`: سرور Node.js برای دیپلوی مستقیم از گیت‌هاب روی Render، SnappDeploy، Oracle و...
+- `gas/Code.gs`: سورس کد Google Apps Script برای رله ترافیک به سرور مقصد.
+- `client/freednet_client.py` و `client/run.bat`: کلاینت پایتونی ویندوز ۱۱ با رابط گرافیکی (Tkinter)، پروکسی محلی SOCKS5/HTTP روی `127.0.0.1:1080` و بالانسر هوشمند بین چند اکانت گوگل اسکریپت.
 
-## Deploy
+---
 
-Push `package.json`, `server.js`, and this README to a GitHub repository. In SnapDeploy choose **Deploy → GitHub repository**, select the repository and branch, and set the runtime variable `APP_ACCESS_KEY` during deployment or later in Container Settings. Do not commit the key to GitHub. SnapDeploy detects the Node.js app and its start script.
+## راهنمای راه‌اندازی (۳ مرحله)
 
-## Interpretation
+### مرحله ۱: دیپلوی سرور از گیت‌هاب
+1. این مخزن را به **Render**، **SnappDeploy** یا سرور مجازی **Oracle/Docker** متصل کنید.
+2. یک متغیر محیطی (Environment Variable) با نام `AUTH_KEY` و یک مقدار دلخواه و امن (مثلاً یک رمز طولانی) تنظیم کنید.
+3. پس از دیپلوی، آدرس سرور شما (مثلاً `https://freednet.onrender.com`) آماده است. آدرس کامل اندپوینت تونل می‌شود:
+   `https://freednet.onrender.com/tunnel`
 
-- HTTP 2xx with no visible marker: no obvious challenge was found in the sampled response; this does not prove browser access will be CAPTCHA-free.
-- HTTP 403 / 429: blocked or rate-limited response.
-- Challenge marker: a likely CAPTCHA, browser challenge, or human-verification page was detected.
-- Network error / timeout: no usable response was received.
+### مرحله ۲: راه‌اندازی Google Apps Script (برای ۱ یا چند اکانت)
+1. وارد [script.google.com](https://script.google.com) شوید و یک پروژه جدید بسازید.
+2. محتوای فایل `gas/Code.gs` را جایگزین کد پیش‌فرض کنید.
+3. دو خط بالای فایل را ویرایش کنید:
+   - `SERVER_URL`: آدرس سرور مرحله ۱ همراه با `/tunnel`
+   - `AUTH_KEY`: همان کلید `AUTH_KEY` مرحله ۱
+4. روی **Deploy -> New deployment** بزنید، نوع را **Web app** انتخاب کنید:
+   - **Execute as:** `Me`
+   - **Who has access:** `Anyone`
+5. لینک خروجی (`/exec`) را کپی کنید. برای افزایش سهمیه و سرعت، همین کار را روی چند اکانت گوگل دیگر هم انجام دهید.
 
-The app inspects at most 128 KiB of each response and enforces a 30-second cooldown between test runs.
+### مرحله ۳: اجرای کلاینت پایتون در ویندوز ۱۱
+1. پوشه `client` را روی سیستم خود داشته باشید و فایل `run.bat` را اجرا کنید (بدون نیاز به نصب هیچ کتابخانه اضافی — فقط Python 3.8+ نیاز است).
+2. در رابط کاربری:
+   - **Auth Key** را وارد کنید.
+   - از بخش **+ Add Account** لینک‌های `/exec` اکانت‌های گوگل اسکریپت خود را اضافه کنید.
+   - روی **Test All Accounts** بزنید تا از اتصال مطمئن شوید.
+   - روی **Start Proxy** کلیک کنید تا پروکسی محلی روی `127.0.0.1:1080` (با پشتیبانی هم‌زمان از SOCKS5 و HTTP) فعال شود.
+3. در **V2Ray / v2rayN** یا مرورگر، پروکسی `127.0.0.1:1080` را تنظیم کنید.
+
+---
+
+## ویژگی‌های تقسیم هوشمند سهمیه در کلاینت
+- **تقسیم مساوی (`1/N`):** درخواست‌ها بر اساس کمترین تعداد اتصال فعال و کمترین تعداد کل درخواست (`(active, total_requests)`) بین اکانت‌ها توزیع می‌شوند تا سهمیه همه اکانت‌ها یکسان مصرف شود.
+- **کنترل محدودیت ۳۰ تایی گوگل:** سقف هم‌زمانی هر اکانت به‌صورت پیش‌فرض روی `20` (قابل تنظیم) قفل شده تا خطای محدودیت ۳۰ اتصال هم‌زمان رخ ندهد.
+- **Cooldown خودکار:** اگر هر اکانت به محدودیت موقت یا خطای سهمیه گوگل برخورد کند، به‌صورت خودکار وارد حالت انتظار موقت می‌شود و ترافیک بدون قطعی روی اکانت‌های دیگر ادامه پیدا می‌کند.
