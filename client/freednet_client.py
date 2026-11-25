@@ -5,7 +5,9 @@ Uses only Python 3.8+ standard library.
 """
 
 import base64
+from collections import deque
 import ctypes
+import datetime
 import json
 import os
 import queue
@@ -33,8 +35,14 @@ DEFAULT_CONFIG = {
     "listen_host": "127.0.0.1",
     "listen_port": 1080,
     "max_concurrent_per_account": 20,
+    "daily_limit_per_account": 18000,
+    "max_rpm_per_account": 120,
     "accounts": [],
 }
+
+
+def today_str() -> str:
+    return datetime.date.today().isoformat()
 
 
 def enable_windows_dpi_awareness():
@@ -45,25 +53,57 @@ def enable_windows_dpi_awareness():
 
 
 class GasAccount:
-    def __init__(self, name: str, url: str, enabled: bool = True):
+    def __init__(
+        self,
+        name: str,
+        url: str,
+        enabled: bool = True,
+        daily_requests: int = 0,
+        quota_date: str = "",
+    ):
         self.name = name
         self.url = url.strip()
         self.enabled = enabled
         self.active = 0
         self.total_requests = 0
+        self.daily_requests = daily_requests if quota_date == today_str() else 0
+        self.quota_date = today_str()
+        self.rpm_timestamps: deque[float] = deque()
         self.errors = 0
         self.consecutive_rate_limits = 0
         self.cooldown_until = 0.0
         self.last_latency_ms = 0
         self.last_error = ""
 
-    def to_dict(self):
-        return {"name": self.name, "url": self.url, "enabled": self.enabled}
+    def roll_day_if_needed(self):
+        t = today_str()
+        if self.quota_date != t:
+            self.quota_date = t
+            self.daily_requests = 0
+            self.consecutive_rate_limits = 0
+            self.cooldown_until = 0.0
 
-    @property
-    def status_label(self) -> str:
+    def prune_rpm(self, now: float):
+        cutoff = now - 60.0
+        while self.rpm_timestamps and self.rpm_timestamps[0] < cutoff:
+            self.rpm_timestamps.popleft()
+
+    def to_dict(self):
+        self.roll_day_if_needed()
+        return {
+            "name": self.name,
+            "url": self.url,
+            "enabled": self.enabled,
+            "daily_requests": self.daily_requests,
+            "quota_date": self.quota_date,
+        }
+
+    def status_label(self, daily_limit: int) -> str:
+        self.roll_day_if_needed()
         if not self.enabled:
             return "Disabled"
+        if self.daily_requests >= daily_limit:
+            return "Daily Limit"
         now = time.time()
         if now < self.cooldown_until:
             rem = int(self.cooldown_until - now) + 1
@@ -77,20 +117,25 @@ class GasAccount:
 
 class GasAccountPool:
     """
-    Fair & quota-aware scheduler across multiple Google Apps Script Web App accounts.
-    - Enforces max_concurrent per account (safely below GAS's 30-concurrent limit).
-    - Distributes requests evenly using (active_concurrent, total_requests) ordering.
-    - Automatically applies exponential cooldown when an account hits GAS rate/quota limits.
+    Long-session, quota-preserving scheduler across 1..N Google Apps Script accounts:
+    - Enforces max_concurrent per account (below GAS's 30-concurrent limit).
+    - Enforces per-minute rate pacing (max_rpm) so bursts don't trigger Google 429s.
+    - Tracks daily UrlFetchApp budget (default 18,000/day, below Google's 20,000/day limit).
+    - Balances by (active, daily_requests, recent_rpm) so N accounts equalize and stay within limits.
     """
 
-    def __init__(self, max_concurrent: int = 20):
+    def __init__(self, max_concurrent: int = 20, daily_limit: int = 18000, max_rpm: int = 120):
         self.lock = threading.Condition()
         self.accounts: list[GasAccount] = []
         self.max_concurrent = max(1, min(int(max_concurrent), 28))
+        self.daily_limit = max(100, int(daily_limit))
+        self.max_rpm = max(10, int(max_rpm))
 
-    def set_max_concurrent(self, val: int):
+    def update_limits(self, max_concurrent: int, daily_limit: int, max_rpm: int):
         with self.lock:
-            self.max_concurrent = max(1, min(int(val), 28))
+            self.max_concurrent = max(1, min(int(max_concurrent), 28))
+            self.daily_limit = max(100, int(daily_limit))
+            self.max_rpm = max(10, int(max_rpm))
             self.lock.notify_all()
 
     def load_accounts(self, items: list[dict]):
@@ -100,18 +145,24 @@ class GasAccountPool:
                     name=item.get("name", f"Account {i + 1}"),
                     url=item.get("url", ""),
                     enabled=bool(item.get("enabled", True)),
+                    daily_requests=int(item.get("daily_requests", 0)),
+                    quota_date=str(item.get("quota_date", "")),
                 )
                 for i, item in enumerate(items)
                 if item.get("url", "").strip()
             ]
             self.lock.notify_all()
 
-    def acquire(self, timeout: float = 12.0, exclude: set = None) -> GasAccount:
+    def acquire(self, timeout: float = 15.0, exclude: set = None) -> GasAccount:
         deadline = time.time() + timeout
         exclude = exclude or set()
         with self.lock:
             while True:
                 now = time.time()
+                for acc in self.accounts:
+                    acc.roll_day_if_needed()
+                    acc.prune_rpm(now)
+
                 candidates = [
                     acc
                     for acc in self.accounts
@@ -119,22 +170,37 @@ class GasAccountPool:
                     and acc.url
                     and acc not in exclude
                     and now >= acc.cooldown_until
+                    and acc.daily_requests < self.daily_limit
                     and acc.active < self.max_concurrent
+                    and len(acc.rpm_timestamps) < self.max_rpm
                 ]
                 if candidates:
-                    chosen = min(candidates, key=lambda a: (a.active, a.total_requests))
+                    # Equalize both concurrency and daily quota across all accounts
+                    chosen = min(
+                        candidates,
+                        key=lambda a: (a.active, a.daily_requests, len(a.rpm_timestamps), a.total_requests),
+                    )
                     chosen.active += 1
                     chosen.total_requests += 1
+                    chosen.daily_requests += 1
+                    chosen.rpm_timestamps.append(now)
                     return chosen
 
-                any_enabled = any(acc.enabled and acc.url and acc not in exclude for acc in self.accounts)
-                if not any_enabled:
-                    raise RuntimeError("No enabled GAS accounts available")
+                # Fallback if all accounts are only hitting soft RPM cap (never exceed max_concurrent or daily_limit)
+                any_under_daily = any(
+                    acc.enabled
+                    and acc.url
+                    and acc not in exclude
+                    and acc.daily_requests < self.daily_limit
+                    for acc in self.accounts
+                )
+                if not any_under_daily:
+                    raise RuntimeError("No GAS accounts with remaining daily quota")
 
                 remaining = deadline - now
                 if remaining <= 0:
-                    raise RuntimeError("All GAS accounts are busy or in cooldown")
-                self.lock.wait(timeout=min(remaining, 0.5))
+                    raise RuntimeError("All GAS accounts are temporarily paced or in cooldown")
+                self.lock.wait(timeout=min(remaining, 0.35))
 
     def release(self, acc: GasAccount, ok: bool, latency_ms: int, rate_limited: bool = False, err_msg: str = ""):
         with self.lock:
@@ -441,7 +507,14 @@ class FreeDnetProxyServer:
         return data
 
     def _relay_loop(self, client_sock: socket.socket, session_id: str):
+        """
+        Adaptive long-polling loop:
+        - When data is actively flowing, uses minimal timeout (8ms) and waitMs=0 for high speed.
+        - When idle, backs off waitMs up to 9000ms (server wakes immediately on incoming data),
+          drastically cutting daily UrlFetchApp quota usage so 1..N accounts last for hours.
+        """
         prev_had_rx = False
+        idle_cycles = 0
         while self.running:
             client_sock.settimeout(0.008 if prev_had_rx else 0.05)
             outgoing = b""
@@ -457,13 +530,20 @@ class FreeDnetProxyServer:
                 return
 
             if outgoing:
+                idle_cycles = 0
                 with self._stat_lock:
                     self.tx_bytes += len(outgoing)
                 b64_in = base64.b64encode(outgoing).decode("ascii")
                 wait_ms = 0
-            else:
+            elif prev_had_rx:
+                idle_cycles = 0
                 b64_in = ""
-                wait_ms = 0 if prev_had_rx else 2500
+                wait_ms = 0
+            else:
+                idle_cycles += 1
+                b64_in = ""
+                # Adaptive backoff: 2.5s -> 5s -> 9s when socket is idle
+                wait_ms = 2500 if idle_cycles == 1 else (5000 if idle_cycles == 2 else 9000)
 
             res = self._gas_request(
                 "sync",
@@ -476,6 +556,7 @@ class FreeDnetProxyServer:
             raw_out = base64.b64decode(res["data"]) if res.get("data") else b""
             prev_had_rx = len(raw_out) > 0
             if raw_out:
+                idle_cycles = 0
                 try:
                     client_sock.sendall(raw_out)
                     with self._stat_lock:
@@ -533,20 +614,26 @@ if HAS_TK:
         def __init__(self, root: tk.Tk):
             self.root = root
             self.root.title("FreeDnet Client — Multi-Account GAS Proxy")
-            self.root.geometry("920x680")
-            self.root.minsize(820, 580)
+            self.root.geometry("960x700")
+            self.root.minsize(850, 600)
             self.root.configure(bg=self.BG)
 
             self.config = self._load_config()
-            self.pool = GasAccountPool(self.config.get("max_concurrent_per_account", 20))
+            self.pool = GasAccountPool(
+                max_concurrent=self.config.get("max_concurrent_per_account", 20),
+                daily_limit=self.config.get("daily_limit_per_account", 18000),
+                max_rpm=self.config.get("max_rpm_per_account", 120),
+            )
             self.pool.load_accounts(self.config.get("accounts", []))
             self.proxy = None
             self.log_queue = queue.Queue()
+            self._last_save_ts = time.time()
 
             self._configure_styles()
             self._build_ui()
             self._sync_table()
             self._schedule_ui_tick()
+            self.root.protocol("WM_DELETE_WINDOW", self._on_close)
 
         def _configure_styles(self):
             style = ttk.Style()
@@ -555,7 +642,6 @@ if HAS_TK:
             except Exception:
                 pass
             style.configure("TFrame", background=self.BG)
-            style.configure("Card.TFrame", background=self.CARD, relief="flat")
             style.configure("TLabel", background=self.BG, foreground=self.TEXT, font=("Segoe UI", 9))
             style.configure("Card.TLabel", background=self.CARD, foreground=self.TEXT, font=("Segoe UI", 9))
             style.configure("Muted.TLabel", background=self.CARD, foreground=self.MUTED, font=("Segoe UI", 8))
@@ -585,9 +671,26 @@ if HAS_TK:
                 self.config["max_concurrent_per_account"] = int(self.max_conc_var.get().strip())
             except ValueError:
                 self.config["max_concurrent_per_account"] = 20
+            try:
+                self.config["daily_limit_per_account"] = int(self.daily_limit_var.get().strip())
+            except ValueError:
+                self.config["daily_limit_per_account"] = 18000
+            try:
+                self.config["max_rpm_per_account"] = int(self.max_rpm_var.get().strip())
+            except ValueError:
+                self.config["max_rpm_per_account"] = 120
             self.config["accounts"] = [acc.to_dict() for acc in self.pool.accounts]
             with open(CONFIG_PATH, "w", encoding="utf-8") as f:
                 json.dump(self.config, f, indent=2)
+
+        def _on_close(self):
+            try:
+                self._save_config()
+                if self.proxy and self.proxy.running:
+                    self.proxy.stop()
+            except Exception:
+                pass
+            self.root.destroy()
 
         def _make_btn(self, parent, text, cmd, primary=False, danger=False, width=None):
             bg = self.ACCENT if primary else (self.RED if danger else "#e2e8f0")
@@ -612,7 +715,6 @@ if HAS_TK:
             return btn
 
         def _build_ui(self):
-            # Top Header Bar
             header = tk.Frame(self.root, bg="#0f172a", padx=16, pady=12)
             header.pack(fill="x")
 
@@ -642,7 +744,6 @@ if HAS_TK:
             )
             self.status_lbl.pack(side="right", padx=14)
 
-            # Main Container
             main = ttk.Frame(self.root)
             main.pack(fill="both", expand=True, padx=14, pady=12)
 
@@ -650,13 +751,13 @@ if HAS_TK:
             cfg_card = tk.Frame(main, bg=self.CARD, highlightbackground=self.BORDER, highlightthickness=1, padx=12, pady=10)
             cfg_card.pack(fill="x", pady=(0, 10))
 
-            ttk.Label(cfg_card, text="Connection & Quota Settings", style="Section.TLabel").grid(
-                row=0, column=0, columnspan=7, sticky="w", pady=(0, 8)
+            ttk.Label(cfg_card, text="Connection & Smart Quota Protection", style="Section.TLabel").grid(
+                row=0, column=0, columnspan=8, sticky="w", pady=(0, 8)
             )
 
             ttk.Label(cfg_card, text="Auth Key:", style="Card.TLabel").grid(row=1, column=0, sticky="w", padx=(0, 6), pady=4)
             self.auth_var = tk.StringVar(value=self.config["auth_key"])
-            self.auth_entry = ttk.Entry(cfg_card, textvariable=self.auth_var, show="*", width=28)
+            self.auth_entry = ttk.Entry(cfg_card, textvariable=self.auth_var, show="*", width=26)
             self.auth_entry.grid(row=1, column=1, sticky="w", padx=4, pady=4)
 
             self.show_key_var = tk.BooleanVar(value=False)
@@ -670,14 +771,23 @@ if HAS_TK:
             self.port_var = tk.StringVar(value=str(self.config["listen_port"]))
             ttk.Entry(cfg_card, textvariable=self.port_var, width=7).grid(row=1, column=6, padx=4)
 
-            ttk.Label(cfg_card, text="Max Concurrent / Account:", style="Card.TLabel").grid(row=2, column=0, sticky="w", padx=(0, 6), pady=4)
+            ttk.Label(cfg_card, text="Max Concurrent:", style="Card.TLabel").grid(row=2, column=0, sticky="w", padx=(0, 6), pady=4)
             self.max_conc_var = tk.StringVar(value=str(self.config["max_concurrent_per_account"]))
             ttk.Entry(cfg_card, textvariable=self.max_conc_var, width=8).grid(row=2, column=1, sticky="w", padx=4, pady=4)
+
+            ttk.Label(cfg_card, text="Daily Limit / Acc:", style="Card.TLabel").grid(row=2, column=2, sticky="w", padx=(6, 4))
+            self.daily_limit_var = tk.StringVar(value=str(self.config["daily_limit_per_account"]))
+            ttk.Entry(cfg_card, textvariable=self.daily_limit_var, width=9).grid(row=2, column=3, sticky="w", padx=4)
+
+            ttk.Label(cfg_card, text="Max Req/Min:", style="Card.TLabel").grid(row=2, column=4, sticky="w", padx=(10, 4))
+            self.max_rpm_var = tk.StringVar(value=str(self.config["max_rpm_per_account"]))
+            ttk.Entry(cfg_card, textvariable=self.max_rpm_var, width=7).grid(row=2, column=5, sticky="w", padx=4)
+
             ttk.Label(
                 cfg_card,
-                text="Google Apps Script limit is 30 concurrent executions (15–22 recommended per account)",
+                text="(Safe defaults: 20 conc, 18k/day, 120 rpm)",
                 style="Muted.TLabel",
-            ).grid(row=2, column=2, columnspan=5, sticky="w", padx=6)
+            ).grid(row=2, column=6, columnspan=2, sticky="w", padx=6)
 
             # Card 2: Accounts Table
             acc_card = tk.Frame(main, bg=self.CARD, highlightbackground=self.BORDER, highlightthickness=1, padx=12, pady=10)
@@ -685,23 +795,23 @@ if HAS_TK:
 
             acc_top = tk.Frame(acc_card, bg=self.CARD)
             acc_top.pack(fill="x", pady=(0, 8))
-            ttk.Label(acc_top, text="Google Apps Script Accounts (Fair-Share 1/N Load Balancer)", style="Section.TLabel").pack(side="left")
+            ttk.Label(acc_top, text="Google Apps Script Accounts (Fair-Share + Daily Quota Equalizer)", style="Section.TLabel").pack(side="left")
             self.stats_var = tk.StringVar(value="Tunnels: 0  |  TX: 0.0 KB  |  RX: 0.0 KB")
             ttk.Label(acc_top, textvariable=self.stats_var, style="Muted.TLabel").pack(side="right")
 
             table_wrap = tk.Frame(acc_card, bg=self.CARD)
             table_wrap.pack(fill="both", expand=True)
 
-            cols = ("name", "status", "active", "requests", "share", "latency", "url")
+            cols = ("name", "status", "active", "daily", "share", "latency", "url")
             self.tree = ttk.Treeview(table_wrap, columns=cols, show="headings", height=7)
             headers = [
-                ("name", "Account", 110),
-                ("status", "Status", 110),
-                ("active", "Active", 70),
-                ("requests", "Requests", 80),
-                ("share", "Share %", 75),
-                ("latency", "Latency", 80),
-                ("url", "GAS Web App URL", 310),
+                ("name", "Account", 105),
+                ("status", "Status", 100),
+                ("active", "Active", 65),
+                ("daily", "Daily Quota", 110),
+                ("share", "Session %", 75),
+                ("latency", "Latency", 75),
+                ("url", "GAS Web App URL", 290),
             ]
             for col, text, w in headers:
                 self.tree.heading(col, text=text)
@@ -728,7 +838,7 @@ if HAS_TK:
             ttk.Label(log_hdr, text="Activity Log", style="Section.TLabel").pack(side="left")
             ttk.Label(
                 log_hdr,
-                text="Use SOCKS5 or HTTP proxy on 127.0.0.1:1080 in V2Ray / Browser (ICMP ping is not supported by SOCKS5/HTTP).",
+                text="Use SOCKS5 or HTTP on 127.0.0.1:1080 in V2Ray / Browser (Adaptive long-poll saves daily quota).",
                 style="Muted.TLabel",
             ).pack(side="right")
 
@@ -759,6 +869,7 @@ if HAS_TK:
                 name, url = dlg.result_data
                 with self.pool.lock:
                     self.pool.accounts.append(GasAccount(name, url, True))
+                    self.pool.lock.notify_all()
                 self._save_config()
                 self._sync_table()
                 self.log(f"Added account: {name}")
@@ -800,6 +911,8 @@ if HAS_TK:
             acc = self.pool.accounts[idx]
             acc.enabled = not acc.enabled
             acc.cooldown_until = 0
+            with self.pool.lock:
+                self.pool.lock.notify_all()
             self._save_config()
             self._sync_table()
 
@@ -860,6 +973,7 @@ if HAS_TK:
             if self.proxy and self.proxy.running:
                 self.proxy.stop()
                 self.proxy = None
+                self._save_config()
                 self.status_var.set("● Stopped")
                 self.status_lbl.configure(fg="#f87171")
                 self.start_btn.configure(text="Start Proxy", bg=self.ACCENT, activebackground=self.ACCENT_HOVER)
@@ -870,7 +984,11 @@ if HAS_TK:
                 return
 
             self._save_config()
-            self.pool.set_max_concurrent(self.config["max_concurrent_per_account"])
+            self.pool.update_limits(
+                self.config["max_concurrent_per_account"],
+                self.config["daily_limit_per_account"],
+                self.config["max_rpm_per_account"],
+            )
             try:
                 self.proxy = FreeDnetProxyServer(
                     pool=self.pool,
@@ -906,9 +1024,9 @@ if HAS_TK:
             lat = f"{acc.last_latency_ms} ms" if acc.last_latency_ms > 0 else "-"
             return (
                 acc.name,
-                acc.status_label,
+                acc.status_label(self.pool.daily_limit),
                 f"{acc.active}/{self.pool.max_concurrent}",
-                acc.total_requests,
+                f"{acc.daily_requests}/{self.pool.daily_limit}",
                 share,
                 lat,
                 acc.url,
@@ -929,6 +1047,12 @@ if HAS_TK:
                 self.stats_var.set(
                     f"Tunnels: {self.proxy.active_tunnels}  |  TX: {tx_kb:.1f} KB  |  RX: {rx_kb:.1f} KB"
                 )
+                if time.time() - self._last_save_ts > 30:
+                    self._last_save_ts = time.time()
+                    try:
+                        self._save_config()
+                    except Exception:
+                        pass
             self.root.after(700, self._schedule_ui_tick)
 
 
