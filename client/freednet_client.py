@@ -130,6 +130,7 @@ GAS_QUOTA_PRESETS = {
     "Medium (Balanced: 18 conc | 14k/day | 120 rpm)": (18, 14000, 120),
     "High (Fast: 24 conc | 18k/day | 180 rpm)": (24, 18000, 180),
     "X-High (Max Free: 28 conc | 19.5k/day | 240 rpm)": (28, 19500, 240),
+    "Unlimited (Max Speed: No Client Limit)": (999, 1000000, 999999),
 }
 DEFAULT_PRESET = "Medium (Balanced: 18 conc | 14k/day | 120 rpm)"
 
@@ -356,14 +357,14 @@ class GasAccountPool:
     def __init__(self, max_concurrent: int = 18, daily_limit: int = 14000, max_rpm: int = 120, gas_mode: str = "fair"):
         self.lock = threading.Condition()
         self.accounts: list[GasAccount] = []
-        self.max_concurrent = max(1, min(int(max_concurrent), 28))
+        self.max_concurrent = max(1, min(int(max_concurrent), 999))
         self.daily_limit = max(100, int(daily_limit))
         self.max_rpm = max(10, int(max_rpm))
         self.gas_mode = gas_mode  # "fair" or "priority"
 
     def update_limits(self, max_concurrent: int, daily_limit: int, max_rpm: int, gas_mode: str | None = None):
         with self.lock:
-            self.max_concurrent = max(1, min(int(max_concurrent), 28))
+            self.max_concurrent = max(1, min(int(max_concurrent), 999))
             self.daily_limit = max(100, int(daily_limit))
             self.max_rpm = max(10, int(max_rpm))
             if gas_mode in ("fair", "priority"):
@@ -654,7 +655,7 @@ class FreeDnetProxyServer:
         self.rx_bytes = 0
         self._stat_lock = threading.Lock()
         self._tunnel_sem = threading.Semaphore(96)
-        self._gas_open_sem = threading.Semaphore(16)
+        self._gas_open_sem = threading.Semaphore(40)
         self._last_rl_log = 0.0
 
     def start(self):
@@ -3867,7 +3868,7 @@ class FreeDnetProWindow(QMainWindow):
     def _write_tun_config(self):
         host = self.config["listen_host"]
         port = int(self.config["listen_port"])
-        bypass_domains = ["domain:script.google.com", "domain:googleusercontent.com", "domain:onrender.com", "domain:snapdeploy.app", "domain:snapdeploy.dev"]
+        bypass_domains = ["domain:script.google.com", "domain:googleusercontent.com", "domain:onrender.com", "domain:snapdeploy.app", "domain:snapdeploy.dev", "domain:workers.dev"]
         for srv in self.server_pool.servers:
             try:
                 h = urllib.parse.urlsplit(srv.url).hostname
@@ -4060,7 +4061,9 @@ class FreeDnetProWindow(QMainWindow):
             share = f"{(acc.total_requests / total_reqs * 100):.1f}%" if total_reqs > 0 else "0.0%"
             lat = f"{acc.last_latency_ms} ms" if acc.last_latency_ms > 0 else "-"
             status = acc.status_label(self.pool.daily_limit)
-            vals = [f"#{idx + 1}", acc.name, status, f"{acc.active}/{self.pool.max_concurrent}", f"{acc.daily_requests}/{self.pool.daily_limit}", share, lat, acc.url]
+            conc_lbl = "∞" if self.pool.max_concurrent >= 999 else str(self.pool.max_concurrent)
+            daily_lbl = "∞" if self.pool.daily_limit >= 1000000 else str(self.pool.daily_limit)
+            vals = [f"#{idx + 1}", acc.name, status, f"{acc.active}/{conc_lbl}", f"{acc.daily_requests}/{daily_lbl}", share, lat, acc.url]
             for c, v in enumerate(vals):
                 item = self.gas_table.item(idx, c)
                 if item is None:
