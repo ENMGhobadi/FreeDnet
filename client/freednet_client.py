@@ -145,6 +145,8 @@ DEFAULT_CONFIG = {
     "server_mode": "priority", # "priority" (#1 -> #2), "fair" (1/N), or "only:<name>"
     "quota_preset": DEFAULT_PRESET,
     "keep_awake": True,
+    "chain_enabled": False,
+    "chain_uri": "",
     "theme": "Obsidian Slate (Default)",
     "language": "English",
     "accounts": [],
@@ -154,6 +156,92 @@ DEFAULT_CONFIG = {
 
 def today_str() -> str:
     return datetime.date.today().isoformat()
+
+
+def parse_chain_uri(raw_uri: str, dialer_proxy: str = "freednet-socks") -> dict:
+    """Parse a vless:// or trojan:// share link into an Xray outbound dict chained via dialerProxy."""
+    uri = (raw_uri or "").strip()
+    if not uri:
+        raise ValueError("Outbound chain URI is empty.")
+    parsed = urllib.parse.urlsplit(uri)
+    scheme = (parsed.scheme or "").lower()
+    if scheme not in ("vless", "trojan"):
+        raise ValueError("Only vless:// and trojan:// links are supported.")
+    cred = urllib.parse.unquote(parsed.username or "")
+    host = parsed.hostname or ""
+    port = parsed.port
+    if not cred or not host or not port:
+        raise ValueError("Invalid VLESS/Trojan link (missing user, host, or port).")
+
+    qs = urllib.parse.parse_qs(parsed.query, keep_blank_values=True)
+    q = lambda k, default="": (qs.get(k, [default])[0] or default).strip()
+
+    net_type = q("type", "tcp").lower()
+    security = q("security", "none").lower()
+    sni = q("sni", "") or q("peer", "") or q("host", "") or host
+    fp = q("fp", "")
+    alpn_raw = q("alpn", "")
+    alpn = [a.strip() for a in alpn_raw.split(",") if a.strip()] if alpn_raw else []
+
+    stream: dict = {
+        "network": net_type,
+        "security": security,
+        "sockopt": {"dialerProxy": dialer_proxy},
+    }
+
+    if security == "tls":
+        tls_cfg: dict = {"serverName": sni}
+        if q("allowInsecure", "") in ("1", "true", "True") or q("insecure", "") in ("1", "true", "True"):
+            tls_cfg["allowInsecure"] = True
+        if fp:
+            tls_cfg["fingerprint"] = fp
+        if alpn:
+            tls_cfg["alpn"] = alpn
+        stream["tlsSettings"] = tls_cfg
+    elif security == "reality":
+        stream["realitySettings"] = {
+            "serverName": sni,
+            "fingerprint": fp or "chrome",
+            "publicKey": q("pbk", ""),
+            "shortId": q("sid", ""),
+            "spiderX": urllib.parse.unquote(q("spx", "")) or "/",
+        }
+
+    if net_type == "ws":
+        ws_path = urllib.parse.unquote(q("path", "/")) or "/"
+        ws_host = q("host", "") or sni
+        stream["wsSettings"] = {"path": ws_path, "headers": {"Host": ws_host} if ws_host else {}}
+    elif net_type == "grpc":
+        stream["grpcSettings"] = {"serviceName": q("serviceName", "") or q("path", "")}
+    elif net_type == "httpupgrade":
+        stream["httpupgradeSettings"] = {
+            "path": urllib.parse.unquote(q("path", "/")) or "/",
+            "host": q("host", "") or sni,
+        }
+    elif net_type in ("xhttp", "splithttp"):
+        stream[f"{net_type}Settings"] = {
+            "path": urllib.parse.unquote(q("path", "/")) or "/",
+            "host": q("host", "") or sni,
+        }
+
+    if scheme == "vless":
+        user_obj: dict = {"id": cred, "encryption": q("encryption", "none") or "none"}
+        flow = q("flow", "")
+        if flow:
+            user_obj["flow"] = flow
+        return {
+            "tag": "chain-out",
+            "protocol": "vless",
+            "settings": {"vnext": [{"address": host, "port": int(port), "users": [user_obj]}]},
+            "streamSettings": stream,
+        }
+    else:
+        return {
+            "tag": "chain-out",
+            "protocol": "trojan",
+            "settings": {"servers": [{"address": host, "port": int(port), "password": cred}]},
+            "streamSettings": stream,
+        }
 
 
 def enable_windows_dpi_awareness():
@@ -2148,6 +2236,8 @@ LANGUAGES = {
         "listen_ip": "Listen IP:",
         "port": "Port:",
         "keep_awake": "Keep Awake (10m)",
+        "chain_enable": "Outbound Chain (TUN):",
+        "chain_uri_ph": "Optional vless:// or trojan:// link (routes via FreeDnet TCP Tunnel)",
         "full_log": "Full Activity Log",
         "copy_logs": "Copy Logs",
         "clear": "Clear",
@@ -2217,6 +2307,8 @@ LANGUAGES = {
         "listen_ip": "آی‌پی محلی:",
         "port": "پورت:",
         "keep_awake": "بیدار نگه‌داشتن (۱۰ دقیقه)",
+        "chain_enable": "زنجیره خروجی (TUN):",
+        "chain_uri_ph": "لینک اختیاری vless:// یا trojan:// (عبور از تونل TCP در FreeDnet)",
         "full_log": "گزارش کامل فعالیت‌ها",
         "copy_logs": "کپی لاگ‌ها",
         "clear": "پاک کردن",
@@ -2286,6 +2378,8 @@ LANGUAGES = {
         "listen_ip": "监听 IP:",
         "port": "端口:",
         "keep_awake": "保持唤醒 (10分钟)",
+        "chain_enable": "出站链式代理 (TUN):",
+        "chain_uri_ph": "可选 vless:// 或 trojan:// 链接 (通过 FreeDnet TCP 隧道转发)",
         "full_log": "完整活动日志",
         "copy_logs": "复制日志",
         "clear": "清空",
@@ -2355,6 +2449,8 @@ LANGUAGES = {
         "listen_ip": "IP Local:",
         "port": "Puerto:",
         "keep_awake": "Mantener Activo (10m)",
+        "chain_enable": "Cadena Saliente (TUN):",
+        "chain_uri_ph": "Enlace opcional vless:// o trojan:// (vía túnel TCP FreeDnet)",
         "full_log": "Registro Completo de Actividad",
         "copy_logs": "Copiar Registros",
         "clear": "Limpiar",
@@ -2424,6 +2520,8 @@ LANGUAGES = {
         "listen_ip": "Lokale IP:",
         "port": "Port:",
         "keep_awake": "Wach halten (10m)",
+        "chain_enable": "Outbound-Kette (TUN):",
+        "chain_uri_ph": "Optionaler vless:// oder trojan:// Link (über FreeDnet TCP-Tunnel)",
         "full_log": "Vollständiges Aktivitätsprotokoll",
         "copy_logs": "Logs kopieren",
         "clear": "Leeren",
@@ -2493,6 +2591,8 @@ LANGUAGES = {
         "listen_ip": "Локальный IP:",
         "port": "Порт:",
         "keep_awake": "Не усыплять (10м)",
+        "chain_enable": "Цепочка выхода (TUN):",
+        "chain_uri_ph": "Необязательная ссылка vless:// или trojan:// (через TCP-туннель FreeDnet)",
         "full_log": "Полный журнал событий",
         "copy_logs": "Копировать логи",
         "clear": "Очистить",
@@ -2562,6 +2662,8 @@ LANGUAGES = {
         "listen_ip": "待機 IP:",
         "port": "ポート:",
         "keep_awake": "スリープ防止 (10分)",
+        "chain_enable": "アウトバウンド連携 (TUN):",
+        "chain_uri_ph": "任意の vless:// または trojan:// リンク (FreeDnet TCP経由)",
         "full_log": "詳細アクティビティログ",
         "copy_logs": "ログをコピー",
         "clear": "クリア",
@@ -2631,6 +2733,8 @@ LANGUAGES = {
         "listen_ip": "수신 IP:",
         "port": "포트:",
         "keep_awake": "절전 방지 (10분)",
+        "chain_enable": "아웃바운드 체인 (TUN):",
+        "chain_uri_ph": "선택 사항 vless:// 또는 trojan:// 링크 (FreeDnet TCP 터널 경유)",
         "full_log": "전체 활동 로그",
         "copy_logs": "로그 복사",
         "clear": "지우기",
@@ -2966,6 +3070,10 @@ class FreeDnetProWindow(QMainWindow):
         self.config["server_mode"] = self.server_pool.server_mode
         self.config["quota_preset"] = self.preset_combo.currentText()
         self.config["keep_awake"] = self.chk_keep_awake.isChecked()
+        if hasattr(self, "chk_chain_enabled"):
+            self.config["chain_enabled"] = self.chk_chain_enabled.isChecked()
+        if hasattr(self, "chain_uri_edit"):
+            self.config["chain_uri"] = self.chain_uri_edit.text().strip()
         if hasattr(self, "theme_combo"):
             self.config["theme"] = self.theme_combo.currentText()
         if hasattr(self, "lang_combo"):
@@ -3077,6 +3185,7 @@ class FreeDnetProWindow(QMainWindow):
         # Clean Minimal Header Bar
         header = QFrame(objectName="HeaderBar")
         h_lay = FlowLayout(header, margin=14, h_spacing=10, v_spacing=8)
+        h_lay.setContentsMargins(20, 12, 20, 12)
 
         h_lay.addWidget(QLabel("FreeDnet", objectName="BrandTitle"))
         h_lay.addSpacing(8)
@@ -3221,6 +3330,7 @@ class FreeDnetProWindow(QMainWindow):
 
         gas_toolbar = QFrame(objectName="Toolbar")
         gt_lay = FlowLayout(gas_toolbar, margin=10, h_spacing=8, v_spacing=8)
+        gt_lay.setContentsMargins(12, 8, 12, 8)
         self.chk_fair_share = QCheckBox("Fair-Share Quota (1/N Equal)")
         self.chk_fair_share.setChecked(self.config.get("gas_mode", "fair") == "fair")
         self.chk_fair_share.toggled.connect(self._on_gas_mode_change)
@@ -3268,6 +3378,7 @@ class FreeDnetProWindow(QMainWindow):
 
         srv_toolbar = QFrame(objectName="Toolbar")
         st_lay = FlowLayout(srv_toolbar, margin=10, h_spacing=8, v_spacing=8)
+        st_lay.setContentsMargins(12, 8, 12, 8)
         self.lbl_backend_mode = QLabel("Backend Mode:", objectName="FieldLabel")
         st_lay.addWidget(self.lbl_backend_mode)
         self.target_combo = QComboBox()
@@ -3390,7 +3501,7 @@ class FreeDnetProWindow(QMainWindow):
         c_lay1.addWidget(self.lbl_theme)
         self.theme_combo = QComboBox()
         self.theme_combo.addItems(list(THEMES.keys()))
-        saved_theme = self.config.get("theme", "Obsidian Slate (Default)")
+        saved_theme = self.config.get("theme", "Midnight Dark (Default)")
         if saved_theme in THEMES:
             self.theme_combo.setCurrentText(saved_theme)
         self.theme_combo.setMinimumWidth(210)
@@ -3430,6 +3541,19 @@ class FreeDnetProWindow(QMainWindow):
         self.chk_keep_awake.toggled.connect(self._on_keep_awake_change)
         c_lay2.addWidget(self.chk_keep_awake)
         cfg_vlay.addLayout(c_lay2)
+
+        c_lay3 = FlowLayout(margin=0, h_spacing=10, v_spacing=8)
+        self.chk_chain_enabled = QCheckBox(self._t("chain_enable"))
+        self.chk_chain_enabled.setChecked(bool(self.config.get("chain_enabled", False)))
+        self.chk_chain_enabled.toggled.connect(lambda _: self._save_config())
+        c_lay3.addWidget(self.chk_chain_enabled)
+
+        self.chain_uri_edit = QLineEdit(self.config.get("chain_uri", ""))
+        self.chain_uri_edit.setPlaceholderText(self._t("chain_uri_ph"))
+        self.chain_uri_edit.setMinimumWidth(360)
+        self.chain_uri_edit.editingFinished.connect(self._save_config)
+        c_lay3.addWidget(self.chain_uri_edit)
+        cfg_vlay.addLayout(c_lay3)
         set_lay.addWidget(cfg_card)
 
         log_hdr = QHBoxLayout()
@@ -3759,6 +3883,10 @@ class FreeDnetProWindow(QMainWindow):
         self.lbl_listen_ip.setText(self._t("listen_ip"))
         self.lbl_port.setText(self._t("port"))
         self.chk_keep_awake.setText(self._t("keep_awake"))
+        if hasattr(self, "chk_chain_enabled"):
+            self.chk_chain_enabled.setText(self._t("chain_enable"))
+        if hasattr(self, "chain_uri_edit"):
+            self.chain_uri_edit.setPlaceholderText(self._t("chain_uri_ph"))
         self.lbl_full_log.setText(self._t("full_log"))
         self.cpy_btn.setText(self._t("copy_logs"))
         self.clr_btn.setText(self._t("clear"))
@@ -4544,6 +4672,11 @@ class FreeDnetProWindow(QMainWindow):
                 }
             ],
             "outbounds": [
+                *(
+                    [parse_chain_uri(self.config.get("chain_uri", ""), dialer_proxy="freednet-socks")]
+                    if self.config.get("chain_enabled") and self.config.get("chain_uri", "").strip()
+                    else []
+                ),
                 {
                     "tag": "freednet-socks",
                     "protocol": "socks",
@@ -4569,7 +4702,11 @@ class FreeDnetProWindow(QMainWindow):
                         if os.path.exists(os.path.join(XRAY_DIR, "geosite.dat"))
                         else []
                     ),
-                    {"type": "field", "network": "tcp", "outboundTag": "freednet-socks"},
+                    {
+                        "type": "field",
+                        "network": "tcp",
+                        "outboundTag": "chain-out" if (self.config.get("chain_enabled") and self.config.get("chain_uri", "").strip()) else "freednet-socks",
+                    },
                     {"type": "field", "network": "udp", "outboundTag": "block"},
                 ],
             },
@@ -4646,6 +4783,21 @@ class FreeDnetProWindow(QMainWindow):
                 ctypes.windll.shell32.ShellExecuteW(None, "runas", sys.executable, launch_arg, BASE_DIR, 1)
                 self._quit_app()
             return
+
+        self._save_config()
+        if self.config.get("chain_enabled"):
+            if self.config.get("proxy_mode", "tcp") == "mitm":
+                QMessageBox.warning(
+                    self,
+                    "Outbound Chain",
+                    "Outbound Chain (VLESS/Trojan) requires TCP Tunnel mode. Switch Proxy Mode from HTTP MITM Relay to TCP Tunnel first.",
+                )
+                return
+            try:
+                parse_chain_uri(self.config.get("chain_uri", ""))
+            except Exception as e:
+                QMessageBox.warning(self, "Outbound Chain", f"Invalid VLESS/Trojan URI:\n{e}")
+                return
 
         if not (self.proxy and self.proxy.running):
             self.toggle_proxy()
