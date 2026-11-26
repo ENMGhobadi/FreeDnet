@@ -10,13 +10,16 @@
  * Otherwise your /exec URL will keep running the old version!
  */
 
-const DEFAULT_SERVER_URL = "https://your-app.onrender.com/tunnel";
 const AUTH_KEY = "change-me-freednet-key";
+// Optional fallback only if the local client sends no serverUrl (leave empty when managing servers in the client UI)
+const DEFAULT_SERVER_URL = "";
 
 function normalizeTunnelUrl(rawUrl) {
   const trimmed = String(rawUrl || "").trim().replace(/\/+$/, "");
-  if (!trimmed) return DEFAULT_SERVER_URL;
-  return trimmed.endsWith("/tunnel") ? trimmed : trimmed + "/tunnel";
+  const fallback = String(DEFAULT_SERVER_URL || "").trim().replace(/\/+$/, "");
+  const chosen = trimmed || fallback;
+  if (!chosen) return "";
+  return chosen.endsWith("/tunnel") ? chosen : chosen + "/tunnel";
 }
 
 function doGet(e) {
@@ -42,6 +45,9 @@ function doPost(e) {
     }
 
     targetUrl = normalizeTunnelUrl(payload.serverUrl);
+    if (!targetUrl) {
+      return jsonResponse({ ok: false, error: "No backend serverUrl provided by client" });
+    }
 
     const options = {
       method: "post",
