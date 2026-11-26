@@ -11,7 +11,7 @@ if exist ".venv\Scripts\python.exe" (
 
 "%PY%" make_icon.py
 
-"%PY%" -c "import PySide6, PyInstaller" >nul 2>&1
+"%PY%" -c "import PySide6, PyInstaller, cryptography" >nul 2>&1
 if not errorlevel 1 (
     echo PySide6 and PyInstaller already installed. Skipping download.
     goto :build

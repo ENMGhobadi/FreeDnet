@@ -113,6 +113,88 @@ function closeSession(sessionId) {
   sessions.delete(sessionId);
 }
 
+
+const HOP_BY_HOP_REQ = new Set([
+  'host', 'connection', 'keep-alive', 'proxy-connection', 'proxy-authenticate',
+  'proxy-authorization', 'te', 'trailers', 'transfer-encoding', 'upgrade',
+  'content-length', 'accept-encoding'
+]);
+const HOP_BY_HOP_RESP = new Set([
+  'connection', 'keep-alive', 'proxy-connection', 'transfer-encoding',
+  'content-encoding', 'content-length', 'upgrade'
+]);
+
+async function handleHttpFetch(body, res) {
+  const targetUrl = String(body.url || '').trim();
+  const method = String(body.method || 'GET').toUpperCase();
+  if (!/^https?:\/\//i.test(targetUrl)) {
+    return sendJson(res, 400, { ok: false, error: 'Invalid URL' });
+  }
+
+  const reqHeaders = {};
+  if (body.headers && typeof body.headers === 'object') {
+    for (const [k, v] of Object.entries(body.headers)) {
+      if (!HOP_BY_HOP_REQ.has(k.toLowerCase()) && v !== undefined && v !== null) {
+        reqHeaders[k] = String(v);
+      }
+    }
+  }
+
+  const fetchOpts = { method, headers: reqHeaders, redirect: 'manual' };
+  if (body.body && method !== 'GET' && method !== 'HEAD') {
+    fetchOpts.body = Buffer.from(body.body, 'base64');
+  }
+
+  const ctrl = new AbortController();
+  const timer = setTimeout(() => ctrl.abort(), 25000);
+  fetchOpts.signal = ctrl.signal;
+
+  try {
+    const resp = await fetch(targetUrl, fetchOpts);
+    clearTimeout(timer);
+    const arr = new Uint8Array(await resp.arrayBuffer());
+    const buf = Buffer.from(arr);
+
+    const outHeaders = {};
+    resp.headers.forEach((val, key) => {
+      if (!HOP_BY_HOP_RESP.has(key.toLowerCase())) {
+        outHeaders[key] = val;
+      }
+    });
+
+    const acceptGzip = Boolean(body.acceptGzip);
+    if (acceptGzip && buf.length > 512 && buf.length <= 2 * 1024 * 1024) {
+      try {
+        const gz = zlib.gzipSync(buf, { level: 1 });
+        if (gz.length < buf.length) {
+          return sendJson(res, 200, {
+            ok: true,
+            status: resp.status,
+            statusText: resp.statusText || '',
+            headers: outHeaders,
+            bodyZ: gz.toString('base64')
+          });
+        }
+      } catch (_) {}
+    }
+
+    return sendJson(res, 200, {
+      ok: true,
+      status: resp.status,
+      statusText: resp.statusText || '',
+      headers: outHeaders,
+      body: buf.length ? buf.toString('base64') : ''
+    });
+  } catch (err) {
+    clearTimeout(timer);
+    return sendJson(res, 502, {
+      ok: false,
+      targetError: true,
+      error: err && err.message ? err.message : String(err)
+    });
+  }
+}
+
 function handleOpen(body, res) {
   const targetHost = String(body.targetHost || '').trim();
   const targetPort = parseInt(body.targetPort, 10);
@@ -325,6 +407,9 @@ const server = http.createServer(async (req, res) => {
     if (action === 'close') {
       closeSession(String(body.sessionId || ''));
       return sendJson(res, 200, { ok: true });
+    }
+    if (action === 'http_fetch') {
+      return handleHttpFetch(body, res);
     }
 
     return sendJson(res, 400, { ok: false, error: 'Unknown action' });

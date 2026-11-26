@@ -51,6 +51,79 @@ async function gunzipBytes(bytes) {
   return new Uint8Array(buf);
 }
 
+
+const HOP_BY_HOP_REQ = new Set([
+  "host", "connection", "keep-alive", "proxy-connection", "proxy-authenticate",
+  "proxy-authorization", "te", "trailers", "transfer-encoding", "upgrade",
+  "content-length", "accept-encoding"
+]);
+const HOP_BY_HOP_RESP = new Set([
+  "connection", "keep-alive", "proxy-connection", "transfer-encoding",
+  "content-encoding", "content-length", "upgrade"
+]);
+
+async function handleHttpFetch(body) {
+  const targetUrl = String(body.url || "").trim();
+  const method = String(body.method || "GET").toUpperCase();
+  if (!/^https?:\/\//i.test(targetUrl)) {
+    return jsonResponse({ ok: false, error: "Invalid URL" }, 400);
+  }
+
+  const reqHeaders = new Headers();
+  if (body.headers && typeof body.headers === "object") {
+    for (const [k, v] of Object.entries(body.headers)) {
+      if (!HOP_BY_HOP_REQ.has(k.toLowerCase()) && v !== undefined && v !== null) {
+        try { reqHeaders.set(k, String(v)); } catch (_) {}
+      }
+    }
+  }
+
+  const fetchOpts = { method, headers: reqHeaders, redirect: "manual" };
+  if (body.body && method !== "GET" && method !== "HEAD") {
+    fetchOpts.body = base64ToBytes(body.body);
+  }
+
+  try {
+    const resp = await fetch(targetUrl, fetchOpts);
+    const bytes = new Uint8Array(await resp.arrayBuffer());
+
+    const outHeaders = {};
+    resp.headers.forEach((val, key) => {
+      if (!HOP_BY_HOP_RESP.has(key.toLowerCase())) {
+        outHeaders[key] = val;
+      }
+    });
+
+    if (body.acceptGzip && bytes.length > 512 && bytes.length <= 2 * 1024 * 1024) {
+      try {
+        const gz = await gzipBytes(bytes);
+        if (gz.length < bytes.length) {
+          return jsonResponse({
+            ok: true,
+            status: resp.status,
+            statusText: resp.statusText || "",
+            headers: outHeaders,
+            bodyZ: bytesToBase64(gz),
+          });
+        }
+      } catch (_) {}
+    }
+
+    return jsonResponse({
+      ok: true,
+      status: resp.status,
+      statusText: resp.statusText || "",
+      headers: outHeaders,
+      body: bytes.length ? bytesToBase64(bytes) : "",
+    });
+  } catch (err) {
+    return jsonResponse(
+      { ok: false, targetError: true, error: err && err.message ? err.message : String(err) },
+      502
+    );
+  }
+}
+
 export class TunnelSessionDO extends DurableObject {
   constructor(ctx, env) {
     super(ctx, env);
@@ -276,6 +349,9 @@ export default {
       const action = body.action;
       if (action === "ping") {
         return jsonResponse({ ok: true, service: "FreeDnet-CF", activeSessions: 0, ts: Date.now() });
+      }
+      if (action === "http_fetch") {
+        return handleHttpFetch(body);
       }
 
       if (action === "open") {
