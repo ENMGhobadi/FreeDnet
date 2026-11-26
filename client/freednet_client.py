@@ -993,6 +993,7 @@ from PySide6.QtWidgets import (
     QMainWindow,
     QMenu,
     QMessageBox,
+    QProgressBar,
     QPushButton,
     QRadioButton,
     QSystemTrayIcon,
@@ -1208,6 +1209,22 @@ QMenu::item:selected {
     background-color: #2563eb;
     color: #ffffff;
 }
+QProgressBar#BusyBar {
+    background-color: #0d1322;
+    border: none;
+    max-height: 3px;
+    min-height: 3px;
+}
+QProgressBar#BusyBar::chunk {
+    background: qlineargradient(x1:0, y1:0, x2:1, y2:0, stop:0 #2563eb, stop:1 #06b6d4);
+    border-radius: 1px;
+}
+QLabel#BusyLabel {
+    color: #60a5fa;
+    font-size: 12px;
+    font-weight: 600;
+    padding: 0 8px;
+}
 QDialog {
     background-color: #0f172a;
     color: #e2e8f0;
@@ -1281,6 +1298,10 @@ class FreeDnetProWindow(QMainWindow):
         self._tray_notified = False
         self._tun_ui_dirty = False
         self._pending_ip_info = None
+        self._busy_lock = threading.Lock()
+        self._busy_tasks: dict[int, str] = {}
+        self._busy_seq = 0
+        self._spin_idx = 0
         self.proxy = None
         self.xray_proc = None
         self.tun_active = False
@@ -1304,7 +1325,7 @@ class FreeDnetProWindow(QMainWindow):
 
         self.ui_timer = QTimer(self)
         self.ui_timer.timeout.connect(self._on_ui_tick)
-        self.ui_timer.start(500)
+        self.ui_timer.start(200)
 
     def _load_config(self) -> dict:
         if os.path.exists(CONFIG_PATH):
@@ -1400,6 +1421,17 @@ class FreeDnetProWindow(QMainWindow):
             pass
         event.accept()
 
+    def _start_busy(self, label: str) -> int:
+        with self._busy_lock:
+            self._busy_seq += 1
+            tid = self._busy_seq
+            self._busy_tasks[tid] = label
+            return tid
+
+    def _stop_busy(self, tid: int):
+        with self._busy_lock:
+            self._busy_tasks.pop(tid, None)
+
     def log(self, msg: str):
         ts = time.strftime("%H:%M:%S")
         self.log_queue.put(f"[{ts}] {msg}")
@@ -1430,11 +1462,20 @@ class FreeDnetProWindow(QMainWindow):
         self.tun_btn.clicked.connect(self.toggle_tun_mode)
         self.start_btn.clicked.connect(self.toggle_proxy)
 
+        self.busy_label = QLabel("", objectName="BusyLabel")
+        self.busy_label.setVisible(False)
+        h_lay.addWidget(self.busy_label)
         h_lay.addWidget(self.status_pill)
         h_lay.addSpacing(10)
         h_lay.addWidget(self.tun_btn)
         h_lay.addWidget(self.start_btn)
         outer.addWidget(header)
+
+        self.busy_bar = QProgressBar(objectName="BusyBar")
+        self.busy_bar.setRange(0, 0)
+        self.busy_bar.setTextVisible(False)
+        self.busy_bar.setVisible(False)
+        outer.addWidget(self.busy_bar)
 
         # Main Tabbed Workspace
         body = QVBoxLayout()
@@ -1739,6 +1780,16 @@ class FreeDnetProWindow(QMainWindow):
         srv = servers[0]
 
         def worker():
+            tid = self._start_busy(f"Pinging {acc.name}...")
+            try:
+                self._run_ping_single_gas(acc, auth_key, srv)
+            finally:
+                self._stop_busy(tid)
+
+        threading.Thread(target=worker, daemon=True).start()
+
+    def _run_ping_single_gas(self, acc, auth_key, srv):
+        if True:
             payload = {"authKey": auth_key, "action": "ping"}
             if srv is not None:
                 payload["serverUrl"] = srv.url
@@ -1753,8 +1804,6 @@ class FreeDnetProWindow(QMainWindow):
                 acc.last_error = res.get("error", "Error")
                 self.log(f"GAS Ping FAILED [{acc.name}]: {acc.last_error}")
 
-        threading.Thread(target=worker, daemon=True).start()
-
     def _ping_single_server(self, row: int):
         if not (0 <= row < len(self.server_pool.servers)):
             return
@@ -1763,6 +1812,16 @@ class FreeDnetProWindow(QMainWindow):
         direct = self.rb_direct.isChecked()
 
         def worker():
+            tid = self._start_busy(f"Pinging {srv.name}...")
+            try:
+                self._run_ping_single_server(srv, auth_key, direct)
+            finally:
+                self._stop_busy(tid)
+
+        threading.Thread(target=worker, daemon=True).start()
+
+    def _run_ping_single_server(self, srv, auth_key, direct):
+        if True:
             for attempt in range(7):
                 t0 = time.time()
                 if direct or not self.pool.accounts:
@@ -1783,8 +1842,6 @@ class FreeDnetProWindow(QMainWindow):
                 self.server_pool.report_failure(srv, res.get("error", "Error"))
                 self.log(f"Backend FAILED [{srv.name}]: {res.get('error')}")
                 return
-
-        threading.Thread(target=worker, daemon=True).start()
 
     def _make_kpi_card(self, parent_layout, title: str, initial: str) -> QLabel:
         card = QFrame(objectName="KpiCard")
@@ -2001,6 +2058,31 @@ class FreeDnetProWindow(QMainWindow):
                 return
 
             def worker_direct():
+                tid = self._start_busy("Pinging backend servers...")
+                try:
+                    self._run_ping_all_direct(auth_key)
+                finally:
+                    self._stop_busy(tid)
+
+            threading.Thread(target=worker_direct, daemon=True).start()
+            return
+
+        if not self.pool.accounts:
+            QMessageBox.information(self, "No Accounts", "Please add at least one GAS Web App URL first.")
+            return
+
+        def worker():
+            tid = self._start_busy("Pinging relays & servers...")
+            try:
+                self._run_ping_all_gas(auth_key)
+            finally:
+                self._stop_busy(tid)
+
+        threading.Thread(target=worker, daemon=True).start()
+
+    def _run_ping_all_direct(self, auth_key):
+        if True:
+            if True:
                 for srv in list(self.server_pool.servers):
                     for attempt in range(7):
                         t0 = time.time()
@@ -2019,14 +2101,8 @@ class FreeDnetProWindow(QMainWindow):
                         self.log(f"Direct Ping FAILED [{srv.name}]: {res.get('error')}")
                         break
 
-            threading.Thread(target=worker_direct, daemon=True).start()
-            return
-
-        if not self.pool.accounts:
-            QMessageBox.information(self, "No Accounts", "Please add at least one GAS Web App URL first.")
-            return
-
-        def worker():
+    def _run_ping_all_gas(self, auth_key):
+        if True:
             servers = self.server_pool.get_candidates()
             for acc in list(self.pool.accounts):
                 srv = servers[0]
@@ -2064,8 +2140,6 @@ class FreeDnetProWindow(QMainWindow):
                         self.log(f"Backend FAILED [{srv.name}]: {res.get('error')}")
                         break
 
-        threading.Thread(target=worker, daemon=True).start()
-
     def test_proxy_e2e(self):
         if not (self.proxy and self.proxy.running):
             QMessageBox.information(self, "Proxy Stopped", "Click 'Start Proxy' first.")
@@ -2074,6 +2148,7 @@ class FreeDnetProWindow(QMainWindow):
         port = self.config["listen_port"]
 
         def worker():
+            tid = self._start_busy("Testing E2E proxy...")
             t0 = time.time()
             try:
                 s = socket.create_connection((host, port), timeout=25)
@@ -2093,6 +2168,8 @@ class FreeDnetProWindow(QMainWindow):
                 self.log(f"E2E Proxy Test OK via {host}:{port} -> {first_line} ({lat} ms)")
             except Exception as e:
                 self.log(f"E2E Proxy Test FAILED -> {e}")
+            finally:
+                self._stop_busy(tid)
 
         threading.Thread(target=worker, daemon=True).start()
 
@@ -2188,6 +2265,16 @@ class FreeDnetProWindow(QMainWindow):
         port = self.config["listen_port"]
 
         def worker():
+            tid = self._start_busy("Checking Exit IP & Country...")
+            try:
+                self._run_country_ip(via_proxy, host, port)
+            finally:
+                self._stop_busy(tid)
+
+        threading.Thread(target=worker, daemon=True).start()
+
+    def _run_country_ip(self, via_proxy, host, port):
+        if True:
             self.log(f"Checking IP/Country ({'via FreeDnet proxy' if via_proxy else 'direct system connection'})...")
             for name, url in COUNTRY_CHECK_ENDPOINTS:
                 try:
@@ -2216,8 +2303,6 @@ class FreeDnetProWindow(QMainWindow):
                 except Exception as e:
                     self.log(f"Country Check [{name}] failed ({e}), trying next...")
             self.log("Country Check FAILED: All IP lookup services timed out.")
-
-        threading.Thread(target=worker, daemon=True).start()
 
     def _download_with_fallback(self, url: str, timeout: float = 35.0) -> bytes:
         req = urllib.request.Request(url, headers={"User-Agent": "FreeDnet-Client/2.0"})
@@ -2361,6 +2446,7 @@ class FreeDnetProWindow(QMainWindow):
         self.tun_btn.setText("Starting TUN...")
 
         def worker():
+            tid = self._start_busy("Preparing Xray TUN & Wintun...")
             try:
                 ok = self._ensure_xray_tun_assets()
                 if not ok:
@@ -2390,6 +2476,7 @@ class FreeDnetProWindow(QMainWindow):
                 self.tun_active = False
                 self.log(f"TUN Mode FAILED -> {e}")
             finally:
+                self._stop_busy(tid)
                 self._tun_ui_dirty = True
 
         threading.Thread(target=worker, daemon=True).start()
@@ -2501,6 +2588,18 @@ class FreeDnetProWindow(QMainWindow):
             self.diag_ip_val.setText(ip)
             self.diag_country_val.setText(loc)
             self.diag_isp_val.setText(isp)
+
+        with self._busy_lock:
+            active_labels = list(self._busy_tasks.values())
+        if active_labels:
+            frames = ("⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏")
+            self._spin_idx = (self._spin_idx + 1) % len(frames)
+            self.busy_label.setText(f"{frames[self._spin_idx]} {active_labels[-1]}")
+            self.busy_label.setVisible(True)
+            self.busy_bar.setVisible(True)
+        else:
+            self.busy_label.setVisible(False)
+            self.busy_bar.setVisible(False)
 
         if getattr(self, "tray", None):
             running = bool(self.proxy and self.proxy.running)
