@@ -14,6 +14,7 @@ import ctypes
 import datetime
 import gzip
 import http.client
+import ipaddress
 import io
 import json
 import os
@@ -139,6 +140,7 @@ DEFAULT_CONFIG = {
     "listen_host": "127.0.0.1",
     "listen_port": 1080,
     "route_mode": "gas",       # "gas" or "direct"
+    "proxy_mode": "tcp",       # "tcp" or "mitm"
     "gas_mode": "fair",        # "fair" (1/N) or "priority" (#1 -> #2)
     "server_mode": "priority", # "priority" (#1 -> #2), "fair" (1/N), or "only:<name>"
     "quota_preset": DEFAULT_PRESET,
@@ -627,6 +629,176 @@ def post_direct_to_server(server_url: str, payload: dict, auth_key: str, timeout
         return {"ok": False, "upstreamError": True, "error": str(e)}
 
 
+
+CERTS_DIR = os.path.join(BASE_DIR, "certs")
+CA_CERT_PATH = os.path.join(CERTS_DIR, "freednet_ca.crt")
+CA_KEY_PATH = os.path.join(CERTS_DIR, "freednet_ca.key")
+
+
+class CertManager:
+    """Generates and caches a local Root CA and per-host leaf TLS certificates for HTTP MITM mode."""
+
+    def __init__(self, certs_dir: str = CERTS_DIR):
+        self.certs_dir = certs_dir
+        self.hosts_dir = os.path.join(certs_dir, "hosts")
+        self.ca_cert_path = os.path.join(certs_dir, "freednet_ca.crt")
+        self.ca_key_path = os.path.join(certs_dir, "freednet_ca.key")
+        self._lock = threading.Lock()
+        self._ctx_cache: dict[str, ssl.SSLContext] = {}
+        self._ca_cert = None
+        self._ca_key = None
+
+    def ensure_ca(self) -> str:
+        from cryptography import x509
+        from cryptography.hazmat.primitives import hashes, serialization
+        from cryptography.hazmat.primitives.asymmetric import rsa
+        from cryptography.x509.oid import NameOID
+
+        with self._lock:
+            if self._ca_cert is not None and self._ca_key is not None and os.path.exists(self.ca_cert_path):
+                return self.ca_cert_path
+
+            os.makedirs(self.hosts_dir, exist_ok=True)
+            if os.path.exists(self.ca_cert_path) and os.path.exists(self.ca_key_path):
+                with open(self.ca_cert_path, "rb") as f:
+                    self._ca_cert = x509.load_pem_x509_certificate(f.read())
+                with open(self.ca_key_path, "rb") as f:
+                    self._ca_key = serialization.load_pem_private_key(f.read(), password=None)
+                return self.ca_cert_path
+
+            key = rsa.generate_private_key(public_exponent=65537, key_size=2048)
+            subject = issuer = x509.Name([
+                x509.NameAttribute(NameOID.COMMON_NAME, "FreeDnet Local Root CA"),
+                x509.NameAttribute(NameOID.ORGANIZATION_NAME, "FreeDnet"),
+            ])
+            now = datetime.datetime.now(datetime.timezone.utc)
+            cert = (
+                x509.CertificateBuilder()
+                .subject_name(subject)
+                .issuer_name(issuer)
+                .public_key(key.public_key())
+                .serial_number(x509.random_serial_number())
+                .not_valid_before(now - datetime.timedelta(days=1))
+                .not_valid_after(now + datetime.timedelta(days=3650))
+                .add_extension(x509.BasicConstraints(ca=True, path_length=None), critical=True)
+                .add_extension(
+                    x509.KeyUsage(
+                        digital_signature=True,
+                        content_commitment=False,
+                        key_encipherment=False,
+                        data_encipherment=False,
+                        key_agreement=False,
+                        key_cert_sign=True,
+                        crl_sign=True,
+                        encipher_only=False,
+                        decipher_only=False,
+                    ),
+                    critical=True,
+                )
+                .sign(key, hashes.SHA256())
+            )
+            with open(self.ca_key_path, "wb") as f:
+                f.write(
+                    key.private_bytes(
+                        encoding=serialization.Encoding.PEM,
+                        format=serialization.PrivateFormat.TraditionalOpenSSL,
+                        encryption_algorithm=serialization.NoEncryption(),
+                    )
+                )
+            with open(self.ca_cert_path, "wb") as f:
+                f.write(cert.public_bytes(serialization.Encoding.PEM))
+            self._ca_cert = cert
+            self._ca_key = key
+            return self.ca_cert_path
+
+    def get_ssl_context(self, host: str) -> ssl.SSLContext:
+        clean_host = host.strip().lower().strip("[]")
+        with self._lock:
+            cached = self._ctx_cache.get(clean_host)
+            if cached is not None:
+                return cached
+
+        self.ensure_ca()
+        from cryptography import x509
+        from cryptography.hazmat.primitives import hashes, serialization
+        from cryptography.hazmat.primitives.asymmetric import rsa
+        from cryptography.x509.oid import NameOID
+
+        safe_name = "".join(c if (c.isalnum() or c in ".-_") else "_" for c in clean_host)[:96]
+        cert_file = os.path.join(self.hosts_dir, f"{safe_name}.crt")
+        key_file = os.path.join(self.hosts_dir, f"{safe_name}.key")
+
+        with self._lock:
+            cached = self._ctx_cache.get(clean_host)
+            if cached is not None:
+                return cached
+
+            if not (os.path.exists(cert_file) and os.path.exists(key_file)):
+                leaf_key = rsa.generate_private_key(public_exponent=65537, key_size=2048)
+                subject = x509.Name([x509.NameAttribute(NameOID.COMMON_NAME, clean_host[:64])])
+                try:
+                    san_entry = x509.IPAddress(ipaddress.ip_address(clean_host))
+                except ValueError:
+                    san_entry = x509.DNSName(clean_host)
+                now = datetime.datetime.now(datetime.timezone.utc)
+                leaf_cert = (
+                    x509.CertificateBuilder()
+                    .subject_name(subject)
+                    .issuer_name(self._ca_cert.subject)
+                    .public_key(leaf_key.public_key())
+                    .serial_number(x509.random_serial_number())
+                    .not_valid_before(now - datetime.timedelta(days=1))
+                    .not_valid_after(now + datetime.timedelta(days=365))
+                    .add_extension(x509.SubjectAlternativeName([san_entry]), critical=False)
+                    .add_extension(x509.BasicConstraints(ca=False, path_length=None), critical=True)
+                    .sign(self._ca_key, hashes.SHA256())
+                )
+                with open(key_file, "wb") as f:
+                    f.write(
+                        leaf_key.private_bytes(
+                            encoding=serialization.Encoding.PEM,
+                            format=serialization.PrivateFormat.TraditionalOpenSSL,
+                            encryption_algorithm=serialization.NoEncryption(),
+                        )
+                    )
+                with open(cert_file, "wb") as f:
+                    f.write(leaf_cert.public_bytes(serialization.Encoding.PEM))
+
+            ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+            ctx.load_cert_chain(certfile=cert_file, keyfile=key_file)
+            try:
+                ctx.set_alpn_protocols(["http/1.1"])
+            except Exception:
+                pass
+            if len(self._ctx_cache) > 256:
+                self._ctx_cache.clear()
+            self._ctx_cache[clean_host] = ctx
+            return ctx
+
+
+_CERT_MGR = CertManager()
+
+
+def install_windows_ca_cert(cert_path: str) -> tuple[bool, str]:
+    if sys.platform != "win32":
+        return False, f"CA cert saved at: {cert_path}"
+    try:
+        flags = getattr(subprocess, "CREATE_NO_WINDOW", 0)
+        proc = subprocess.run(
+            ["certutil", "-user", "-addstore", "Root", cert_path],
+            capture_output=True,
+            text=True,
+            creationflags=flags,
+            timeout=30,
+        )
+        out = (proc.stdout or "") + (proc.stderr or "")
+        if proc.returncode == 0:
+            return True, "CA certificate installed to Windows Current User Trusted Root store."
+        return False, out.strip()[:260] or f"certutil exited with code {proc.returncode}"
+    except Exception as e:
+        return False, str(e)
+
+
 class FreeDnetProxyServer:
     def __init__(
         self,
@@ -637,6 +809,7 @@ class FreeDnetProxyServer:
         port: int,
         log_fn,
         route_mode: str = "gas",
+        proxy_mode: str = "tcp",
         keep_awake: bool = True,
     ):
         self.pool = pool
@@ -646,6 +819,7 @@ class FreeDnetProxyServer:
         self.port = port
         self.log = log_fn
         self.route_mode = route_mode  # "gas" or "direct"
+        self.proxy_mode = proxy_mode  # "tcp" or "mitm"
         self.keep_awake = keep_awake
 
         self.running = False
@@ -668,7 +842,8 @@ class FreeDnetProxyServer:
         threading.Thread(target=self._accept_loop, daemon=True).start()
         threading.Thread(target=self._keep_awake_loop, daemon=True).start()
         mode_lbl = "Direct" if self.route_mode == "direct" else f"GAS:{self.pool.gas_mode}"
-        self.log(f"Proxy listening on {self.host}:{self.port} [{mode_lbl} | Backend: {self.server_pool.server_mode}]")
+        pmode_lbl = "HTTP-MITM" if self.proxy_mode == "mitm" else "TCP-Tunnel"
+        self.log(f"Proxy listening on {self.host}:{self.port} [{mode_lbl} | {pmode_lbl} | Backend: {self.server_pool.server_mode}]")
 
     def stop(self):
         self.running = False
@@ -755,6 +930,186 @@ class FreeDnetProxyServer:
         finally:
             if open_acquired:
                 self._gas_open_sem.release()
+
+    def _http_fetch_with_failover(self, url: str, method: str, headers: dict, req_body: bytes) -> dict:
+        candidates = self.server_pool.get_candidates(require_explicit=(self.route_mode == "direct"))
+        if not candidates:
+            return {"ok": False, "error": "No enabled backend servers available"}
+
+        body_b64 = base64.b64encode(req_body).decode("ascii") if req_body else ""
+        req_payload = {
+            "url": url,
+            "method": method,
+            "headers": headers,
+            "acceptGzip": True,
+        }
+        if body_b64:
+            req_payload["body"] = body_b64
+
+        last_res = {"ok": False, "error": "No backend servers available"}
+        for srv in candidates:
+            res = self._send_request("http_fetch", req_payload, backend=srv, retries=1)
+            if res.get("ok"):
+                return res
+            last_res = res
+            if srv is not None and len(candidates) > 1 and res.get("upstreamError"):
+                self.log(f"Backend [{srv.name}] failed ({res.get('error')}), failing over...")
+                continue
+            if not res.get("upstreamError"):
+                break
+        return last_res
+
+    def _read_http_message(self, sock: socket.socket, buf: bytearray):
+        while b"\r\n\r\n" not in buf:
+            chunk = sock.recv(8192)
+            if not chunk:
+                return None
+            buf.extend(chunk)
+            if len(buf) > 131072:
+                return None
+
+        sep = buf.index(b"\r\n\r\n")
+        head_bytes = bytes(buf[:sep])
+        del buf[: sep + 4]
+
+        lines = head_bytes.decode("latin-1").split("\r\n")
+        if not lines:
+            return None
+        parts = lines[0].split(" ")
+        if len(parts) < 3:
+            return None
+        method, target, version = parts[0].upper(), parts[1], parts[2]
+
+        headers = {}
+        content_length = 0
+        is_chunked = False
+        conn_hdr = ""
+        for ln in lines[1:]:
+            if ":" not in ln:
+                continue
+            k, v = ln.split(":", 1)
+            k_s, v_s = k.strip(), v.strip()
+            headers[k_s] = v_s
+            kl = k_s.lower()
+            if kl == "content-length":
+                try:
+                    content_length = max(0, int(v_s))
+                except ValueError:
+                    content_length = 0
+            elif kl == "transfer-encoding" and "chunked" in v_s.lower():
+                is_chunked = True
+            elif kl == "connection":
+                conn_hdr = v_s.lower()
+
+        req_body = b""
+        if is_chunked:
+            chunks = []
+            while True:
+                while b"\r\n" not in buf:
+                    more = sock.recv(8192)
+                    if not more:
+                        return None
+                    buf.extend(more)
+                idx = buf.index(b"\r\n")
+                sz_line = bytes(buf[:idx]).decode("latin-1").split(";", 1)[0].strip()
+                del buf[: idx + 2]
+                sz = int(sz_line, 16)
+                if sz == 0:
+                    while b"\r\n" not in buf:
+                        more = sock.recv(4096)
+                        if not more:
+                            break
+                        buf.extend(more)
+                    if buf.startswith(b"\r\n"):
+                        del buf[:2]
+                    break
+                while len(buf) < sz + 2:
+                    more = sock.recv(8192)
+                    if not more:
+                        return None
+                    buf.extend(more)
+                chunks.append(bytes(buf[:sz]))
+                del buf[: sz + 2]
+            req_body = b"".join(chunks)
+        elif content_length > 0:
+            while len(buf) < content_length:
+                more = sock.recv(min(65536, content_length - len(buf)))
+                if not more:
+                    return None
+                buf.extend(more)
+            req_body = bytes(buf[:content_length])
+            del buf[:content_length]
+
+        return method, target, version, headers, req_body, conn_hdr
+
+    def _mitm_http_loop(self, sock: socket.socket, scheme: str, default_host: str, default_port: int, initial_buf: bytes = b""):
+        buf = bytearray(initial_buf)
+        sock.settimeout(30.0)
+        while self.running:
+            parsed = self._read_http_message(sock, buf)
+            if not parsed:
+                return
+            method, target, _version, headers, req_body, conn_hdr = parsed
+
+            host_hdr = ""
+            for k, v in headers.items():
+                if k.lower() == "host":
+                    host_hdr = v
+                    break
+            if not host_hdr:
+                host_hdr = default_host if (scheme == "https" and default_port == 443) or (scheme == "http" and default_port == 80) else f"{default_host}:{default_port}"
+
+            if target.startswith(("http://", "https://")):
+                full_url = target
+            else:
+                path = target if target.startswith("/") else f"/{target}"
+                full_url = f"{scheme}://{host_hdr}{path}"
+
+            if req_body:
+                with self._stat_lock:
+                    self.tx_bytes += len(req_body)
+
+            res = self._http_fetch_with_failover(full_url, method, headers, req_body)
+            if not res.get("ok"):
+                err_msg = str(res.get("error", "Bad Gateway"))
+                self.log(f"MITM fetch failed {full_url[:80]} -> {err_msg}")
+                err_body = f"FreeDnet MITM Error: {err_msg}".encode("utf-8", errors="replace")
+                resp_head = (
+                    f"HTTP/1.1 502 Bad Gateway\r\n"
+                    f"Content-Type: text/plain; charset=utf-8\r\n"
+                    f"Content-Length: {len(err_body)}\r\n"
+                    f"Connection: close\r\n\r\n"
+                ).encode("ascii")
+                sock.sendall(resp_head + err_body)
+                return
+
+            if res.get("bodyZ"):
+                resp_body = gzip.decompress(base64.b64decode(res["bodyZ"]))
+            elif res.get("body"):
+                resp_body = base64.b64decode(res["body"])
+            else:
+                resp_body = b""
+
+            if resp_body:
+                with self._stat_lock:
+                    self.rx_bytes += len(resp_body)
+
+            status = int(res.get("status", 200))
+            status_text = str(res.get("statusText") or "OK")
+            resp_headers = res.get("headers") or {}
+            keep_alive = conn_hdr != "close"
+
+            hdr_lines = [f"HTTP/1.1 {status} {status_text}"]
+            for hk, hv in resp_headers.items():
+                if hk.lower() in ("content-length", "transfer-encoding", "connection", "content-encoding"):
+                    continue
+                hdr_lines.append(f"{hk}: {hv}")
+            hdr_lines.append(f"Content-Length: {len(resp_body)}")
+            hdr_lines.append(f"Connection: {'keep-alive' if keep_alive else 'close'}")
+            raw_resp = ("\r\n".join(hdr_lines) + "\r\n\r\n").encode("latin-1", errors="replace") + resp_body
+            sock.sendall(raw_resp)
+            if not keep_alive:
+                return
 
     def _open_with_failover(self, host: str, port: int, init_b64: str) -> tuple[dict, BackendServer | None]:
         candidates = self.server_pool.get_candidates(require_explicit=(self.route_mode == "direct"))
@@ -854,6 +1209,22 @@ class FreeDnetProxyServer:
             host, port = target
             proto = "SOCKS5" if is_socks5 else "HTTP"
             self.log(f"{proto} -> {host}:{port}")
+
+            if self.proxy_mode == "mitm" and not is_socks5:
+                if is_http_connect:
+                    client_sock.sendall(b"HTTP/1.1 200 Connection Established\r\n\r\n")
+                    ssl_ctx = _CERT_MGR.get_ssl_context(host)
+                    tls_sock = ssl_ctx.wrap_socket(client_sock, server_side=True)
+                    try:
+                        self._mitm_http_loop(tls_sock, "https", host, port, initial_buf=initial_data)
+                    finally:
+                        try:
+                            tls_sock.close()
+                        except Exception:
+                            pass
+                else:
+                    self._mitm_http_loop(client_sock, "http", host, port, initial_buf=initial_data)
+                return
             init_b64 = base64.b64encode(initial_data).decode("ascii") if initial_data else ""
             if initial_data:
                 with self._stat_lock:
@@ -1543,6 +1914,10 @@ QDialog {{
 LANGUAGES = {
     "English": {
         "rtl": False,
+        "proxy_mode": "Proxy Mode:",
+        "rb_tcp": "TCP Tunnel (All Apps / SOCKS5)",
+        "rb_mitm": "HTTP MITM Relay (Fast Web / Browser)",
+        "install_ca": "🔒 Install CA Cert",
         "win_title": "FreeDnet Pro — Smart Proxy Router",
         "subtitle": "Smart Tunnel & Multi-Relay Router",
         "stopped": "● STOPPED",
@@ -1608,6 +1983,10 @@ LANGUAGES = {
     },
     "فارسی (Persian)": {
         "rtl": True,
+        "proxy_mode": "حالت پروکسی:",
+        "rb_tcp": "تونل TCP (همه برنامه‌ها / SOCKS5)",
+        "rb_mitm": "رله سریع HTTP MITM (مخصوص مرورگر و وب)",
+        "install_ca": "🔒 نصب گواهی CA",
         "win_title": "FreeDnet Pro — مسیریاب هوشمند پروکسی",
         "subtitle": "تونل هوشمند و رله چندسروره",
         "stopped": "● متوقف",
@@ -1673,6 +2052,10 @@ LANGUAGES = {
     },
     "中文 (Chinese)": {
         "rtl": False,
+        "proxy_mode": "代理模式:",
+        "rb_tcp": "TCP 隧道 (全部应用 / SOCKS5)",
+        "rb_mitm": "HTTP MITM 中继 (极速网页 / 浏览器)",
+        "install_ca": "🔒 安装 CA 证书",
         "win_title": "FreeDnet Pro — 智能代理路由器",
         "subtitle": "智能隧道与多中继路由",
         "stopped": "● 已停止",
@@ -1738,6 +2121,10 @@ LANGUAGES = {
     },
     "Español (Spanish)": {
         "rtl": False,
+        "proxy_mode": "Modo Proxy:",
+        "rb_tcp": "Túnel TCP (Todas las Apps / SOCKS5)",
+        "rb_mitm": "Relay HTTP MITM (Web Rápida / Navegador)",
+        "install_ca": "🔒 Instalar Cert CA",
         "win_title": "FreeDnet Pro — Enrutador Proxy Inteligente",
         "subtitle": "Túnel Inteligente y Multi-Relay",
         "stopped": "● DETENIDO",
@@ -1803,6 +2190,10 @@ LANGUAGES = {
     },
     "Deutsch (German)": {
         "rtl": False,
+        "proxy_mode": "Proxy-Modus:",
+        "rb_tcp": "TCP-Tunnel (Alle Apps / SOCKS5)",
+        "rb_mitm": "HTTP-MITM-Relay (Schnelles Web / Browser)",
+        "install_ca": "🔒 CA-Zertifikat installieren",
         "win_title": "FreeDnet Pro — Intelligenter Proxy-Router",
         "subtitle": "Smart Tunnel & Multi-Relay Router",
         "stopped": "● GESTOPPT",
@@ -1868,6 +2259,10 @@ LANGUAGES = {
     },
     "Русский (Russian)": {
         "rtl": False,
+        "proxy_mode": "Режим прокси:",
+        "rb_tcp": "TCP-туннель (Все приложения / SOCKS5)",
+        "rb_mitm": "HTTP MITM реле (Быстрый веб / Браузер)",
+        "install_ca": "🔒 Установить CA сертификат",
         "win_title": "FreeDnet Pro — Умный прокси-роутер",
         "subtitle": "Умный туннель и мульти-ретранслятор",
         "stopped": "● ОСТАНОВЛЕН",
@@ -1933,6 +2328,10 @@ LANGUAGES = {
     },
     "日本語 (Japanese)": {
         "rtl": False,
+        "proxy_mode": "プロキシモード:",
+        "rb_tcp": "TCP トンネル (全アプリ / SOCKS5)",
+        "rb_mitm": "HTTP MITM リレー (高速 Web / ブラウザ)",
+        "install_ca": "🔒 CA 証明書をインストール",
         "win_title": "FreeDnet Pro — スマートプロキシ ルーター",
         "subtitle": "スマートトンネル & マルチリレー",
         "stopped": "● 停止中",
@@ -1998,6 +2397,10 @@ LANGUAGES = {
     },
     "한국어 (Korean)": {
         "rtl": False,
+        "proxy_mode": "프록시 모드:",
+        "rb_tcp": "TCP 터널 (모든 앱 / SOCKS5)",
+        "rb_mitm": "HTTP MITM 릴레이 (고속 웹 / 브라우저)",
+        "install_ca": "🔒 CA 인증서 설치",
         "win_title": "FreeDnet Pro — 스마트 프록시 라우터",
         "subtitle": "스마트 터널 & 멀티 릴레이 라우터",
         "stopped": "● 중지됨",
@@ -2380,6 +2783,7 @@ class FreeDnetProWindow(QMainWindow):
         self.config["auth_key"] = self.auth_edit.text().strip()
         self.config["listen_host"] = self.host_edit.text().strip() or "127.0.0.1"
         self.config["route_mode"] = "direct" if self.rb_direct.isChecked() else "gas"
+        self.config["proxy_mode"] = "mitm" if self.rb_mitm.isChecked() else "tcp"
         self.config["gas_mode"] = "fair" if self.chk_fair_share.isChecked() else "priority"
         self.config["server_mode"] = self.server_pool.server_mode
         self.config["quota_preset"] = self.preset_combo.currentText()
@@ -2580,6 +2984,27 @@ class FreeDnetProWindow(QMainWindow):
         self.ip_badge = QLabel("Exit IP: Not checked yet", objectName="Muted")
         r1.addWidget(self.ip_badge)
         r_lay.addLayout(r1)
+
+        r2 = QHBoxLayout()
+        self.lbl_proxy_mode = QLabel("Proxy Mode:", objectName="FieldLabel")
+        r2.addWidget(self.lbl_proxy_mode)
+        self.rb_tcp = QRadioButton("TCP Tunnel (All Apps / SOCKS5)")
+        self.rb_mitm = QRadioButton("HTTP MITM Relay (Fast Web / Browser)")
+        self.proxy_mode_grp = QButtonGroup(self)
+        self.proxy_mode_grp.addButton(self.rb_tcp)
+        self.proxy_mode_grp.addButton(self.rb_mitm)
+        if self.config.get("proxy_mode", "tcp") == "mitm":
+            self.rb_mitm.setChecked(True)
+        else:
+            self.rb_tcp.setChecked(True)
+        self.rb_tcp.toggled.connect(self._on_proxy_mode_change)
+        r2.addWidget(self.rb_tcp)
+        r2.addWidget(self.rb_mitm)
+        r2.addStretch()
+        self.install_ca_btn = QPushButton("🔒 Install CA Cert", objectName="SmallBtn")
+        self.install_ca_btn.clicked.connect(self.install_ca_certificate)
+        r2.addWidget(self.install_ca_btn)
+        r_lay.addLayout(r2)
         ov_lay.addWidget(route_card)
 
         # Compact recent activity preview on Overview
@@ -3100,6 +3525,10 @@ class FreeDnetProWindow(QMainWindow):
         self.lbl_chain_mode.setText(self._t("chain_mode"))
         self.rb_gas.setText(self._t("rb_gas"))
         self.rb_direct.setText(self._t("rb_direct"))
+        self.lbl_proxy_mode.setText(self._t("proxy_mode"))
+        self.rb_tcp.setText(self._t("rb_tcp"))
+        self.rb_mitm.setText(self._t("rb_mitm"))
+        self.install_ca_btn.setText(self._t("install_ca"))
         if self.ip_badge.text().startswith(("Exit IP: Not", "آی‌پی خروجی:", "出口 IP:", "IP de Salida:", "Ausgangs-IP:", "Выходной IP:", "출구 IP:")):
             self.ip_badge.setText(self._t("exit_ip_unset"))
         self.lbl_recent_act.setText(self._t("recent_activity"))
@@ -3155,6 +3584,28 @@ class FreeDnetProWindow(QMainWindow):
             lbl = "DIRECT" if mode == "direct" else "GAS"
             self.status_pill.setText(f"● RUNNING · {lbl}")
             self.log(f"Switched live chain mode to: {lbl}")
+
+    def _on_proxy_mode_change(self):
+        pmode = "mitm" if self.rb_mitm.isChecked() else "tcp"
+        if pmode == "mitm":
+            _CERT_MGR.ensure_ca()
+        self._save_config()
+        if self.proxy and self.proxy.running:
+            self.proxy.proxy_mode = pmode
+            self.log(f"Switched live proxy mode to: {'HTTP-MITM' if pmode == 'mitm' else 'TCP-Tunnel'}")
+
+    def install_ca_certificate(self):
+        try:
+            cert_path = _CERT_MGR.ensure_ca()
+            ok, msg = install_windows_ca_cert(cert_path)
+            self.log(f"CA Cert: {msg}")
+            if ok:
+                QMessageBox.information(self, "CA Certificate Installed", f"{msg}\n\nRestart your browser if it was already open.")
+            else:
+                QMessageBox.information(self, "CA Certificate", f"{msg}\n\nPath: {cert_path}")
+        except Exception as e:
+            self.log(f"CA Cert error: {e}")
+            QMessageBox.warning(self, "CA Error", str(e))
 
     # --- GAS Account CRUD ---
     def add_account(self):
@@ -3724,6 +4175,9 @@ class FreeDnetProWindow(QMainWindow):
         conc, daily, rpm = GAS_QUOTA_PRESETS.get(self.preset_combo.currentText(), (18, 14000, 120))
         self.pool.update_limits(conc, daily, rpm, gas_mode=("fair" if self.chk_fair_share.isChecked() else "priority"))
         try:
+            pmode = "mitm" if self.rb_mitm.isChecked() else "tcp"
+            if pmode == "mitm":
+                _CERT_MGR.ensure_ca()
             self.proxy = FreeDnetProxyServer(
                 pool=self.pool,
                 server_pool=self.server_pool,
@@ -3732,6 +4186,7 @@ class FreeDnetProWindow(QMainWindow):
                 port=self.config["listen_port"],
                 log_fn=self.log,
                 route_mode=mode,
+                proxy_mode=pmode,
                 keep_awake=bool(self.chk_keep_awake.isChecked()),
             )
             self.proxy.start()
