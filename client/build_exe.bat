@@ -44,7 +44,7 @@ if exist "build" rmdir /s /q "build"
 if exist "FreeDnet.spec" del /q "FreeDnet.spec"
 if exist "dist\FreeDnet.exe" del /q "dist\FreeDnet.exe"
 
-"%PY%" -m PyInstaller --noconfirm --clean --onefile --windowed --icon=freednet.ico --add-data "freednet.ico;." --add-data "..\cloudflare\worker.js;cloudflare" --name FreeDnet ^
+"%PY%" -m PyInstaller --noconfirm --clean --onefile --windowed --icon=freednet.ico --add-data "freednet.ico;." --add-data "..\cloudflare\worker.js;cloudflare" --hidden-import=cryptography --name FreeDnet ^
   --exclude-module PySide6.QtWebEngineCore ^
   --exclude-module PySide6.QtWebEngineWidgets ^
   --exclude-module PySide6.QtWebEngineQuick ^

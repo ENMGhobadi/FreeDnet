@@ -145,7 +145,7 @@ DEFAULT_CONFIG = {
     "server_mode": "priority", # "priority" (#1 -> #2), "fair" (1/N), or "only:<name>"
     "quota_preset": DEFAULT_PRESET,
     "keep_awake": True,
-    "theme": "Midnight Dark (Default)",
+    "theme": "Obsidian Slate (Default)",
     "language": "English",
     "accounts": [],
     "servers": [],
@@ -648,7 +648,34 @@ class CertManager:
         self._ca_cert = None
         self._ca_key = None
 
+    def _ensure_cryptography(self):
+        try:
+            import cryptography  # noqa: F401
+            return
+        except ImportError:
+            if getattr(sys, "frozen", False):
+                raise RuntimeError("Missing 'cryptography' in compiled EXE. Please rebuild using build_exe.bat.")
+            proc = subprocess.run(
+                [sys.executable, "-m", "pip", "install", "cryptography"],
+                capture_output=True,
+                text=True,
+                timeout=90,
+            )
+            if proc.returncode != 0:
+                clean_env = {k: v for k, v in os.environ.items() if k.lower() not in ("http_proxy", "https_proxy", "all_proxy")}
+                clean_env["NO_PROXY"] = "*"
+                proc2 = subprocess.run(
+                    [sys.executable, "-m", "pip", "install", "--no-cache-dir", "cryptography"],
+                    capture_output=True,
+                    text=True,
+                    env=clean_env,
+                    timeout=90,
+                )
+                if proc2.returncode != 0:
+                    raise RuntimeError(f"Could not auto-install 'cryptography': {(proc2.stderr or proc.stderr)[:200]}")
+
     def ensure_ca(self) -> str:
+        self._ensure_cryptography()
         from cryptography import x509
         from cryptography.hazmat.primitives import hashes, serialization
         from cryptography.hazmat.primitives.asymmetric import rsa
@@ -1474,9 +1501,10 @@ class FreeDnetProxyServer:
             closed_evt.set()
             tx_thread.join(timeout=0.5)
 
-from PySide6.QtCore import Qt, QTimer
+from PySide6.QtCore import QPoint, QRect, QSize, Qt, QTimer
 from PySide6.QtGui import QAction, QColor, QIcon
 from PySide6.QtWidgets import (
+    QLayout,
     QAbstractItemView,
     QApplication,
     QButtonGroup,
@@ -1505,176 +1533,263 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
+
+class FlowLayout(QLayout):
+    """Responsive wrapping layout so toolbars and cards never overlap on narrow windows."""
+
+    def __init__(self, parent=None, margin: int = 0, h_spacing: int = 8, v_spacing: int = 8):
+        super().__init__(parent)
+        self._items = []
+        self._h_space = h_spacing
+        self._v_space = v_spacing
+        self.setContentsMargins(margin, margin, margin, margin)
+
+    def addItem(self, item):
+        self._items.append(item)
+
+    def addWidget(self, w):
+        super().addWidget(w)
+
+    def addSpacing(self, _px: int):
+        pass
+
+    def addStretch(self, _s: int = 0):
+        pass
+
+    def count(self):
+        return len(self._items)
+
+    def itemAt(self, index):
+        return self._items[index] if 0 <= index < len(self._items) else None
+
+    def takeAt(self, index):
+        return self._items.pop(index) if 0 <= index < len(self._items) else None
+
+    def expandingDirections(self):
+        return Qt.Orientation(0)
+
+    def hasHeightForWidth(self):
+        return True
+
+    def heightForWidth(self, width):
+        return self._do_layout(QRect(0, 0, width, 0), True)
+
+    def setGeometry(self, rect):
+        super().setGeometry(rect)
+        self._do_layout(rect, False)
+
+    def sizeHint(self):
+        return self.minimumSize()
+
+    def minimumSize(self):
+        size = QSize()
+        for item in self._items:
+            size = size.expandedTo(item.minimumSize())
+        m = self.contentsMargins()
+        size += QSize(m.left() + m.right(), m.top() + m.bottom())
+        return size
+
+    def _do_layout(self, rect, test_only):
+        m = self.contentsMargins()
+        eff = rect.adjusted(m.left(), m.top(), -m.right(), -m.bottom())
+        x = eff.x()
+        y = eff.y()
+        line_height = 0
+        for item in self._items:
+            sz = item.sizeHint()
+            next_x = x + sz.width() + self._h_space
+            if next_x - self._h_space > eff.right() + 1 and line_height > 0:
+                x = eff.x()
+                y += line_height + self._v_space
+                next_x = x + sz.width() + self._h_space
+                line_height = 0
+            if not test_only:
+                item.setGeometry(QRect(QPoint(x, y), sz))
+            x = next_x
+            line_height = max(line_height, sz.height())
+        return y + line_height - rect.y() + m.bottom()
+
+
 THEMES = {
-    "Midnight Dark (Default)": {
+    "Obsidian Slate (Default)": {
         "is_light": False,
-        "bg": "#090d16",
-        "header": "#0d1322",
-        "card": "#111827",
+        "bg": "#0b0f19",
+        "header": "#101625",
+        "card": "#131b2e",
         "kpi": "#0f172a",
-        "toolbar": "#0d1424",
-        "input": "#0b1120",
-        "console": "#050811",
-        "border": "#1e293b",
-        "input_border": "#293548",
-        "text": "#e2e8f0",
+        "toolbar": "#101829",
+        "input": "#0b1220",
+        "console": "#070b14",
+        "border": "#22304a",
+        "input_border": "#2d3f5e",
+        "text": "#f1f5f9",
         "title": "#ffffff",
         "muted": "#94a3b8",
-        "label": "#cbd5e1",
-        "accent1": "#2563eb",
-        "accent2": "#0284c7",
-        "accent_hover1": "#1d4ed8",
-        "accent_hover2": "#0369a1",
+        "label": "#e2e8f0",
+        "accent1": "#3b82f6",
+        "accent2": "#06b6d4",
+        "accent_hover1": "#2563eb",
+        "accent_hover2": "#0891b2",
         "accent_light": "#60a5fa",
+        "tile_bg": "#0f172a",
+        "tile_checked_bg": "#172554",
         "badge_bg": "#1d4ed8",
-        "badge_fg": "#dbeafe",
+        "badge_fg": "#eff6ff",
         "btn_bg": "#1e293b",
         "btn_hover": "#283548",
         "btn_border": "#334155",
-        "sel_bg": "#1e3a8a",
-        "alt_row": "#0f172a",
-        "hdr_bg": "#131c31",
-        "pill_stop_bg": "#2a1218",
-        "pill_stop_fg": "#f87171",
-        "pill_stop_bd": "#7f1d1d",
-        "pill_run_bg": "#052e1c",
-        "pill_run_fg": "#34d399",
-        "pill_run_bd": "#065f46",
-    },
-    "Slate Blue & Cool Gray": {
-        "is_light": False,
-        "bg": "#2b3340",
-        "header": "#232a35",
-        "card": "#333d4b",
-        "kpi": "#2d3644",
-        "toolbar": "#27303d",
-        "input": "#252d39",
-        "console": "#1f2630",
-        "border": "#434f61",
-        "input_border": "#4e5c70",
-        "text": "#eef2f7",
-        "title": "#ffffff",
-        "muted": "#b4c0d0",
-        "label": "#dce4ef",
-        "accent1": "#3b82f6",
-        "accent2": "#0ea5e9",
-        "accent_hover1": "#2563eb",
-        "accent_hover2": "#0284c7",
-        "accent_light": "#7dd3fc",
-        "badge_bg": "#2563eb",
-        "badge_fg": "#eff6ff",
-        "btn_bg": "#3b4656",
-        "btn_hover": "#475468",
-        "btn_border": "#56657c",
-        "sel_bg": "#2563eb",
-        "alt_row": "#2f3846",
-        "hdr_bg": "#262e3a",
-        "pill_stop_bg": "#442229",
+        "sel_bg": "#1d4ed8",
+        "alt_row": "#101827",
+        "hdr_bg": "#152036",
+        "pill_stop_bg": "#2b1218",
         "pill_stop_fg": "#fca5a5",
-        "pill_stop_bd": "#991b1b",
-        "pill_run_bg": "#153d30",
+        "pill_stop_bd": "#7f1d1d",
+        "pill_run_bg": "#063120",
         "pill_run_fg": "#6ee7b7",
         "pill_run_bd": "#059669",
     },
-    "Obsidian Orange & Black": {
+    "Nordic Frost (Dark)": {
         "is_light": False,
-        "bg": "#09090b",
-        "header": "#0f0f12",
-        "card": "#141418",
-        "kpi": "#111115",
-        "toolbar": "#101014",
+        "bg": "#191e29",
+        "header": "#141822",
+        "card": "#212736",
+        "kpi": "#1c2230",
+        "toolbar": "#1b202d",
+        "input": "#151a24",
+        "console": "#10141c",
+        "border": "#303a4f",
+        "input_border": "#3c4861",
+        "text": "#e6edf3",
+        "title": "#ffffff",
+        "muted": "#9fb0c7",
+        "label": "#d8e2ef",
+        "accent1": "#58a6ff",
+        "accent2": "#38bdf8",
+        "accent_hover1": "#3b82f6",
+        "accent_hover2": "#0ea5e9",
+        "accent_light": "#79c0ff",
+        "tile_bg": "#1b212e",
+        "tile_checked_bg": "#1e3a5f",
+        "badge_bg": "#2563eb",
+        "badge_fg": "#f0f9ff",
+        "btn_bg": "#2a3244",
+        "btn_hover": "#354057",
+        "btn_border": "#465470",
+        "sel_bg": "#2563eb",
+        "alt_row": "#1e2432",
+        "hdr_bg": "#1a202c",
+        "pill_stop_bg": "#3b1b22",
+        "pill_stop_fg": "#fda4af",
+        "pill_stop_bd": "#9f1239",
+        "pill_run_bg": "#11382d",
+        "pill_run_fg": "#6ee7b7",
+        "pill_run_bd": "#059669",
+    },
+    "Carbon Amber (Dark)": {
+        "is_light": False,
+        "bg": "#0e0e11",
+        "header": "#141418",
+        "card": "#18181d",
+        "kpi": "#131317",
+        "toolbar": "#141419",
         "input": "#0c0c0f",
-        "console": "#060608",
-        "border": "#27272a",
-        "input_border": "#3f3f46",
+        "console": "#08080a",
+        "border": "#2a2a32",
+        "input_border": "#3b3b47",
         "text": "#f4f4f5",
         "title": "#ffffff",
         "muted": "#a1a1aa",
         "label": "#e4e4e7",
-        "accent1": "#f97316",
+        "accent1": "#f59e0b",
         "accent2": "#ea580c",
-        "accent_hover1": "#ea580c",
+        "accent_hover1": "#d97706",
         "accent_hover2": "#c2410c",
-        "accent_light": "#fb923c",
-        "badge_bg": "#c2410c",
-        "badge_fg": "#ffedd5",
-        "btn_bg": "#1f1f24",
-        "btn_hover": "#2c2c33",
-        "btn_border": "#3f3f46",
-        "sel_bg": "#9a3412",
-        "alt_row": "#111115",
-        "hdr_bg": "#18181d",
+        "accent_light": "#fbbf24",
+        "tile_bg": "#141418",
+        "tile_checked_bg": "#3b230a",
+        "badge_bg": "#b45309",
+        "badge_fg": "#fef3c7",
+        "btn_bg": "#23232a",
+        "btn_hover": "#2f2f38",
+        "btn_border": "#3f3f4a",
+        "sel_bg": "#b45309",
+        "alt_row": "#131317",
+        "hdr_bg": "#1b1b21",
         "pill_stop_bg": "#2c1215",
-        "pill_stop_fg": "#f87171",
-        "pill_stop_bd": "#7f1d1d",
-        "pill_run_bg": "#0a2e1d",
-        "pill_run_fg": "#34d399",
-        "pill_run_bd": "#065f46",
-    },
-    "Emerald & Slate Gray": {
-        "is_light": False,
-        "bg": "#212826",
-        "header": "#1a201e",
-        "card": "#29322f",
-        "kpi": "#242c2a",
-        "toolbar": "#1e2523",
-        "input": "#1c2220",
-        "console": "#161b19",
-        "border": "#384440",
-        "input_border": "#465550",
-        "text": "#e7f0ec",
-        "title": "#ffffff",
-        "muted": "#9fb3ac",
-        "label": "#d2e0db",
-        "accent1": "#10b981",
-        "accent2": "#059669",
-        "accent_hover1": "#059669",
-        "accent_hover2": "#047857",
-        "accent_light": "#34d399",
-        "badge_bg": "#047857",
-        "badge_fg": "#d1fae5",
-        "btn_bg": "#313b38",
-        "btn_hover": "#3c4844",
-        "btn_border": "#4b5a55",
-        "sel_bg": "#065f46",
-        "alt_row": "#252d2b",
-        "hdr_bg": "#1e2523",
-        "pill_stop_bg": "#3b1c20",
         "pill_stop_fg": "#fca5a5",
-        "pill_stop_bd": "#991b1b",
-        "pill_run_bg": "#0d3b2c",
+        "pill_stop_bd": "#7f1d1d",
+        "pill_run_bg": "#0b2e1f",
         "pill_run_fg": "#6ee7b7",
         "pill_run_bd": "#059669",
     },
-    "Warm Nescafe (Light)": {
+    "Forest Mint (Dark)": {
+        "is_light": False,
+        "bg": "#101715",
+        "header": "#0d1311",
+        "card": "#17211e",
+        "kpi": "#131c19",
+        "toolbar": "#141d1a",
+        "input": "#0e1513",
+        "console": "#090e0c",
+        "border": "#263832",
+        "input_border": "#314740",
+        "text": "#ecfdf5",
+        "title": "#ffffff",
+        "muted": "#9cb8ae",
+        "label": "#d1fae5",
+        "accent1": "#10b981",
+        "accent2": "#14b8a6",
+        "accent_hover1": "#059669",
+        "accent_hover2": "#0d9488",
+        "accent_light": "#34d399",
+        "tile_bg": "#131c19",
+        "tile_checked_bg": "#0b3b2c",
+        "badge_bg": "#047857",
+        "badge_fg": "#d1fae5",
+        "btn_bg": "#1f2e29",
+        "btn_hover": "#293c36",
+        "btn_border": "#375048",
+        "sel_bg": "#047857",
+        "alt_row": "#141d1a",
+        "hdr_bg": "#182420",
+        "pill_stop_bg": "#36181c",
+        "pill_stop_fg": "#fca5a5",
+        "pill_stop_bd": "#991b1b",
+        "pill_run_bg": "#0b3628",
+        "pill_run_fg": "#6ee7b7",
+        "pill_run_bd": "#059669",
+    },
+    "Alabaster Daylight (Light)": {
         "is_light": True,
-        "bg": "#f4ede4",
-        "header": "#ebe1d5",
-        "card": "#fcf8f3",
-        "kpi": "#f7f1e9",
-        "toolbar": "#efe6db",
+        "bg": "#f1f5f9",
+        "header": "#ffffff",
+        "card": "#ffffff",
+        "kpi": "#f8fafc",
+        "toolbar": "#f8fafc",
         "input": "#ffffff",
-        "console": "#faf5ee",
-        "border": "#ddd0c0",
-        "input_border": "#cbb9a4",
-        "text": "#2c2119",
-        "title": "#1f1610",
-        "muted": "#776252",
-        "label": "#4a382b",
-        "accent1": "#b5693c",
-        "accent2": "#965129",
-        "accent_hover1": "#9e572e",
-        "accent_hover2": "#7c4120",
-        "accent_light": "#8f4b25",
-        "badge_bg": "#965129",
-        "badge_fg": "#fff7ed",
-        "btn_bg": "#e7dbcc",
-        "btn_hover": "#dccbb8",
-        "btn_border": "#cbb79f",
-        "sel_bg": "#d6b89c",
-        "alt_row": "#f5ede3",
-        "hdr_bg": "#eadfd1",
-        "pill_stop_bg": "#fde8e8",
+        "console": "#f8fafc",
+        "border": "#cbd5e1",
+        "input_border": "#94a3b8",
+        "text": "#0f172a",
+        "title": "#020617",
+        "muted": "#475569",
+        "label": "#1e293b",
+        "accent1": "#2563eb",
+        "accent2": "#0284c7",
+        "accent_hover1": "#1d4ed8",
+        "accent_hover2": "#0369a1",
+        "accent_light": "#2563eb",
+        "tile_bg": "#f8fafc",
+        "tile_checked_bg": "#dbeafe",
+        "badge_bg": "#1d4ed8",
+        "badge_fg": "#ffffff",
+        "btn_bg": "#e2e8f0",
+        "btn_hover": "#cbd5e1",
+        "btn_border": "#94a3b8",
+        "sel_bg": "#bfdbfe",
+        "alt_row": "#f8fafc",
+        "hdr_bg": "#e2e8f0",
+        "pill_stop_bg": "#fee2e2",
         "pill_stop_fg": "#b91c1c",
         "pill_stop_bd": "#fca5a5",
         "pill_run_bg": "#dcfce7",
@@ -1683,14 +1798,29 @@ THEMES = {
     },
 }
 
+THEME_ALIASES = {
+    "Midnight Dark (Default)": "Obsidian Slate (Default)",
+    "Slate Blue & Cool Gray": "Nordic Frost (Dark)",
+    "Obsidian Orange & Black": "Carbon Amber (Dark)",
+    "Emerald & Slate Gray": "Forest Mint (Dark)",
+    "Warm Nescafe (Light)": "Alabaster Daylight (Light)",
+}
+
 
 def build_qss(t: dict) -> str:
     return f"""
-QMainWindow, QWidget#Root {{
-    background-color: {t["bg"]};
+QWidget {{
     color: {t["text"]};
     font-family: "Segoe UI", "Inter", sans-serif;
     font-size: 13px;
+}}
+QMainWindow, QWidget#Root {{
+    background-color: {t["bg"]};
+    color: {t["text"]};
+}}
+QLabel {{
+    color: {t["text"]};
+    background-color: transparent;
 }}
 QFrame#HeaderBar {{
     background-color: {t["header"]};
@@ -1768,6 +1898,7 @@ QLineEdit, QComboBox {{
     border-radius: 7px;
     padding: 6px 10px;
     selection-background-color: {t["accent1"]};
+    selection-color: #ffffff;
 }}
 QLineEdit:focus, QComboBox:focus {{
     border: 1px solid {t["accent_light"]};
@@ -1781,6 +1912,7 @@ QComboBox QAbstractItemView {{
     color: {t["text"]};
     border: 1px solid {t["btn_border"]};
     selection-background-color: {t["accent1"]};
+    selection-color: #ffffff;
 }}
 QPushButton {{
     background-color: {t["btn_bg"]};
@@ -1793,6 +1925,25 @@ QPushButton {{
 QPushButton:hover {{
     background-color: {t["btn_hover"]};
     border-color: {t["accent_light"]};
+}}
+QPushButton#ModeTile {{
+    background-color: {t["tile_bg"]};
+    color: {t["text"]};
+    border: 1.5px solid {t["border"]};
+    border-radius: 10px;
+    padding: 9px 14px;
+    text-align: left;
+    font-weight: 600;
+    font-size: 12px;
+}}
+QPushButton#ModeTile:hover {{
+    border-color: {t["accent_light"]};
+    background-color: {t["btn_hover"]};
+}}
+QPushButton#ModeTile:checked {{
+    background-color: {t["tile_checked_bg"]};
+    border: 2px solid {t["accent1"]};
+    color: {t["title"]};
 }}
 QPushButton#PrimaryBtn {{
     background: qlineargradient(x1:0, y1:0, x2:1, y2:0, stop:0 {t["accent1"]}, stop:1 {t["accent2"]});
@@ -1815,14 +1966,31 @@ QPushButton#DangerBtn:hover {{
     background-color: #991b1b;
 }}
 QPushButton#SmallBtn {{
-    padding: 5px 10px;
+    padding: 6px 12px;
     font-size: 12px;
     border-radius: 6px;
 }}
 QRadioButton, QCheckBox {{
     color: {t["text"]};
+    background-color: transparent;
     spacing: 7px;
     font-weight: 500;
+}}
+QCheckBox::indicator, QRadioButton::indicator {{
+    width: 15px;
+    height: 15px;
+    border: 1.5px solid {t["input_border"]};
+    background-color: {t["input"]};
+}}
+QCheckBox::indicator {{
+    border-radius: 4px;
+}}
+QRadioButton::indicator {{
+    border-radius: 8px;
+}}
+QCheckBox::indicator:checked, QRadioButton::indicator:checked {{
+    background-color: {t["accent1"]};
+    border-color: {t["accent1"]};
 }}
 QTabWidget::pane {{
     border: 1px solid {t["border"]};
@@ -1837,7 +2005,7 @@ QTabBar::tab {{
     border-bottom: none;
     border-top-left-radius: 8px;
     border-top-right-radius: 8px;
-    padding: 9px 20px;
+    padding: 9px 18px;
     margin-right: 4px;
     font-weight: 600;
 }}
@@ -1856,9 +2024,13 @@ QTableWidget {{
     selection-background-color: {t["sel_bg"]};
     selection-color: {t["title"]};
 }}
+QTableWidget::item {{
+    color: {t["text"]};
+    padding: 4px;
+}}
 QHeaderView::section {{
     background-color: {t["hdr_bg"]};
-    color: {t["muted"]};
+    color: {t["label"]};
     padding: 8px;
     border: none;
     border-bottom: 1px solid {t["border"]};
@@ -1905,8 +2077,11 @@ QLabel#BusyLabel {{
     font-weight: 600;
     padding: 0 8px;
 }}
-QDialog {{
+QDialog, QMessageBox {{
     background-color: {t["card"]};
+    color: {t["text"]};
+}}
+QDialog QLabel, QMessageBox QLabel {{
     color: {t["text"]};
 }}
 """
@@ -1915,8 +2090,8 @@ LANGUAGES = {
     "English": {
         "rtl": False,
         "proxy_mode": "Proxy Mode:",
-        "rb_tcp": "TCP Tunnel (All Apps / SOCKS5)",
-        "rb_mitm": "HTTP MITM Relay (Fast Web / Browser)",
+        "rb_tcp": "🔌  TCP Tunnel\nAll Apps · SOCKS5 & HTTP",
+        "rb_mitm": "🚀  HTTP MITM Relay\nFast Web · 1-Hop Browser",
         "install_ca": "🔒 Install CA Cert",
         "win_title": "FreeDnet Pro — Smart Proxy Router",
         "subtitle": "Smart Tunnel & Multi-Relay Router",
@@ -1940,8 +2115,8 @@ LANGUAGES = {
         "kpi_traffic": "TOTAL USAGE (↓ / ↑)",
         "kpi_pool": "POOL HEALTH",
         "chain_mode": "Chain Mode:",
-        "rb_gas": "Via Google Apps Script (Anti-Filtering)",
-        "rb_direct": "Direct to Backend (Max Speed)",
+        "rb_gas": "🛡️  GAS Relay\nAnti-Filtering · Multi-Account",
+        "rb_direct": "⚡  Direct Backend\nMax Speed · Low Latency",
         "exit_ip_unset": "Exit IP: Not checked yet",
         "recent_activity": "Recent Activity",
         "row_tip": "Tip: Right-click any account or server row for actions",
@@ -1984,8 +2159,8 @@ LANGUAGES = {
     "فارسی (Persian)": {
         "rtl": True,
         "proxy_mode": "حالت پروکسی:",
-        "rb_tcp": "تونل TCP (همه برنامه‌ها / SOCKS5)",
-        "rb_mitm": "رله سریع HTTP MITM (مخصوص مرورگر و وب)",
+        "rb_tcp": "🔌  تونل کامل TCP\nهمه برنامه‌ها · SOCKS5",
+        "rb_mitm": "🚀  رله سریع HTTP MITM\nمخصوص مرورگر و وب",
         "install_ca": "🔒 نصب گواهی CA",
         "win_title": "FreeDnet Pro — مسیریاب هوشمند پروکسی",
         "subtitle": "تونل هوشمند و رله چندسروره",
@@ -2009,8 +2184,8 @@ LANGUAGES = {
         "kpi_traffic": "مصرف کل (↓ / ↑)",
         "kpi_pool": "سلامت استخر",
         "chain_mode": "مسیر اتصال:",
-        "rb_gas": "از طریق گوگل اسکریپت (ضد فیلتر)",
-        "rb_direct": "مستقیم به بک‌اند (حداکثر سرعت)",
+        "rb_gas": "🛡️  رله گوگل اسکریپت\nضد فیلتر · چنداکانته",
+        "rb_direct": "⚡  مستقیم به بک‌اند\nحداکثر سرعت · پینگ پایین",
         "exit_ip_unset": "آی‌پی خروجی: بررسی نشده",
         "recent_activity": "فعالیت‌های اخیر",
         "row_tip": "نکته: برای مدیریت هر ردیف روی آن راست‌کلیک کنید",
@@ -2053,8 +2228,8 @@ LANGUAGES = {
     "中文 (Chinese)": {
         "rtl": False,
         "proxy_mode": "代理模式:",
-        "rb_tcp": "TCP 隧道 (全部应用 / SOCKS5)",
-        "rb_mitm": "HTTP MITM 中继 (极速网页 / 浏览器)",
+        "rb_tcp": "🔌  TCP 隧道\n全部应用 · SOCKS5 & HTTP",
+        "rb_mitm": "🚀  HTTP MITM 中继\n极速网页 · 单跳加载",
         "install_ca": "🔒 安装 CA 证书",
         "win_title": "FreeDnet Pro — 智能代理路由器",
         "subtitle": "智能隧道与多中继路由",
@@ -2078,8 +2253,8 @@ LANGUAGES = {
         "kpi_traffic": "总流量 (↓ / ↑)",
         "kpi_pool": "节点池状态",
         "chain_mode": "连接模式:",
-        "rb_gas": "通过 Google Apps Script (抗封锁)",
-        "rb_direct": "直连后端 (最高速度)",
+        "rb_gas": "🛡️  GAS 中继\n抗封锁 · 多账号负载均衡",
+        "rb_direct": "⚡  直连后端\n最高速度 · 低延迟",
         "exit_ip_unset": "出口 IP: 尚未检测",
         "recent_activity": "最近活动",
         "row_tip": "提示: 右键点击任意账号或服务器行可执行操作",
@@ -2122,8 +2297,8 @@ LANGUAGES = {
     "Español (Spanish)": {
         "rtl": False,
         "proxy_mode": "Modo Proxy:",
-        "rb_tcp": "Túnel TCP (Todas las Apps / SOCKS5)",
-        "rb_mitm": "Relay HTTP MITM (Web Rápida / Navegador)",
+        "rb_tcp": "🔌  Túnel TCP\nTodas las Apps · SOCKS5",
+        "rb_mitm": "🚀  Relay HTTP MITM\nWeb Rápida · Navegador",
         "install_ca": "🔒 Instalar Cert CA",
         "win_title": "FreeDnet Pro — Enrutador Proxy Inteligente",
         "subtitle": "Túnel Inteligente y Multi-Relay",
@@ -2147,8 +2322,8 @@ LANGUAGES = {
         "kpi_traffic": "USO TOTAL (↓ / ↑)",
         "kpi_pool": "ESTADO DEL POOL",
         "chain_mode": "Modo de Ruta:",
-        "rb_gas": "Vía Google Apps Script (Anti-Bloqueo)",
-        "rb_direct": "Directo al Backend (Máx. Velocidad)",
+        "rb_gas": "🛡️  Relay GAS\nAnti-Bloqueo · Multicuenta",
+        "rb_direct": "⚡  Directo al Backend\nMáx. Velocidad · Baja Latencia",
         "exit_ip_unset": "IP de Salida: Sin comprobar",
         "recent_activity": "Actividad Reciente",
         "row_tip": "Consejo: Haz clic derecho en cualquier fila para ver acciones",
@@ -2191,8 +2366,8 @@ LANGUAGES = {
     "Deutsch (German)": {
         "rtl": False,
         "proxy_mode": "Proxy-Modus:",
-        "rb_tcp": "TCP-Tunnel (Alle Apps / SOCKS5)",
-        "rb_mitm": "HTTP-MITM-Relay (Schnelles Web / Browser)",
+        "rb_tcp": "🔌  TCP-Tunnel\nAlle Apps · SOCKS5 & HTTP",
+        "rb_mitm": "🚀  HTTP-MITM-Relay\nSchnelles Web · Browser",
         "install_ca": "🔒 CA-Zertifikat installieren",
         "win_title": "FreeDnet Pro — Intelligenter Proxy-Router",
         "subtitle": "Smart Tunnel & Multi-Relay Router",
@@ -2216,8 +2391,8 @@ LANGUAGES = {
         "kpi_traffic": "GESAMTVERBRAUCH (↓ / ↑)",
         "kpi_pool": "POOL-STATUS",
         "chain_mode": "Routing-Modus:",
-        "rb_gas": "Über Google Apps Script (Anti-Zensur)",
-        "rb_direct": "Direkt zum Backend (Max. Tempo)",
+        "rb_gas": "🛡️  GAS-Relay\nAnti-Zensur · Multi-Konto",
+        "rb_direct": "⚡  Direkt zum Backend\nMax. Tempo · Niedrige Latenz",
         "exit_ip_unset": "Ausgangs-IP: Nicht geprüft",
         "recent_activity": "Letzte Aktivitäten",
         "row_tip": "Tipp: Rechtsklick auf eine Zeile für weitere Aktionen",
@@ -2260,8 +2435,8 @@ LANGUAGES = {
     "Русский (Russian)": {
         "rtl": False,
         "proxy_mode": "Режим прокси:",
-        "rb_tcp": "TCP-туннель (Все приложения / SOCKS5)",
-        "rb_mitm": "HTTP MITM реле (Быстрый веб / Браузер)",
+        "rb_tcp": "🔌  TCP-туннель\nВсе приложения · SOCKS5",
+        "rb_mitm": "🚀  HTTP MITM реле\nБыстрый веб · Браузер",
         "install_ca": "🔒 Установить CA сертификат",
         "win_title": "FreeDnet Pro — Умный прокси-роутер",
         "subtitle": "Умный туннель и мульти-ретранслятор",
@@ -2285,8 +2460,8 @@ LANGUAGES = {
         "kpi_traffic": "ТРАФИК (↓ / ↑)",
         "kpi_pool": "СОСТОЯНИЕ ПУЛА",
         "chain_mode": "Режим маршрута:",
-        "rb_gas": "Через Google Apps Script (Обход)",
-        "rb_direct": "Напрямую к серверу (Макс. скорость)",
+        "rb_gas": "🛡️  GAS-реле\nОбход блокировок · Мультиаккаунт",
+        "rb_direct": "⚡  Напрямую к серверу\nМакс. скорость · Низкий пинг",
         "exit_ip_unset": "Выходной IP: не проверен",
         "recent_activity": "Последняя активность",
         "row_tip": "Совет: нажмите правой кнопкой по строке для действий",
@@ -2329,8 +2504,8 @@ LANGUAGES = {
     "日本語 (Japanese)": {
         "rtl": False,
         "proxy_mode": "プロキシモード:",
-        "rb_tcp": "TCP トンネル (全アプリ / SOCKS5)",
-        "rb_mitm": "HTTP MITM リレー (高速 Web / ブラウザ)",
+        "rb_tcp": "🔌  TCP トンネル\n全アプリ · SOCKS5 & HTTP",
+        "rb_mitm": "🚀  HTTP MITM リレー\n高速 Web · ブラウザ向け",
         "install_ca": "🔒 CA 証明書をインストール",
         "win_title": "FreeDnet Pro — スマートプロキシ ルーター",
         "subtitle": "スマートトンネル & マルチリレー",
@@ -2354,8 +2529,8 @@ LANGUAGES = {
         "kpi_traffic": "合計通信量 (↓ / ↑)",
         "kpi_pool": "プール状態",
         "chain_mode": "接続モード:",
-        "rb_gas": "Google Apps Script 経由 (検閲回避)",
-        "rb_direct": "バックエンド直結 (最高速度)",
+        "rb_gas": "🛡️  GAS リレー\n検閲回避 · マルチアカウント",
+        "rb_direct": "⚡  バックエンド直結\n最高速度 · 低遅延",
         "exit_ip_unset": "出口 IP: 未確認",
         "recent_activity": "最近のアクティビティ",
         "row_tip": "ヒント: 行を右クリックすると操作メニューが開きます",
@@ -2398,8 +2573,8 @@ LANGUAGES = {
     "한국어 (Korean)": {
         "rtl": False,
         "proxy_mode": "프록시 모드:",
-        "rb_tcp": "TCP 터널 (모든 앱 / SOCKS5)",
-        "rb_mitm": "HTTP MITM 릴레이 (고속 웹 / 브라우저)",
+        "rb_tcp": "🔌  TCP 터널\n모든 앱 · SOCKS5 & HTTP",
+        "rb_mitm": "🚀  HTTP MITM 릴레이\n고속 웹 · 브라우저 전용",
         "install_ca": "🔒 CA 인증서 설치",
         "win_title": "FreeDnet Pro — 스마트 프록시 라우터",
         "subtitle": "스마트 터널 & 멀티 릴레이 라우터",
@@ -2423,8 +2598,8 @@ LANGUAGES = {
         "kpi_traffic": "총 사용량 (↓ / ↑)",
         "kpi_pool": "풀 상태",
         "chain_mode": "연결 모드:",
-        "rb_gas": "Google Apps Script 경유 (차단 우회)",
-        "rb_direct": "백엔드 직접 연결 (최고 속도)",
+        "rb_gas": "🛡️  GAS 릴레이\n차단 우회 · 멀티 계정",
+        "rb_direct": "⚡  백엔드 직접 연결\n최고 속도 · 저지연",
         "exit_ip_unset": "출구 IP: 확인 전",
         "recent_activity": "최근 활동",
         "row_tip": "팁: 항목을 마우스 오른쪽 버튼으로 클릭하면 작업 메뉴가 열립니다",
@@ -2705,8 +2880,8 @@ class FreeDnetProWindow(QMainWindow):
     def __init__(self):
         super().__init__()
         self.setWindowTitle("FreeDnet Pro — Smart Proxy Router")
-        self.resize(980, 640)
-        self.setMinimumSize(860, 560)
+        self.resize(1040, 680)
+        self.setMinimumSize(880, 580)
 
         self._config_load_err = ""
         self.config = self._load_config()
@@ -2748,6 +2923,9 @@ class FreeDnetProWindow(QMainWindow):
         self._prev_rx = 0
         self._peak_tx_rate = 0.0
         self._peak_rx_rate = 0.0
+        self._last_speed_ui_ts = time.time()
+        self._speed_tx_ema = 0.0
+        self._speed_rx_ema = 0.0
 
         icon_path = _resource_path("freednet.ico")
         if os.path.exists(icon_path):
@@ -2757,7 +2935,7 @@ class FreeDnetProWindow(QMainWindow):
         if self._config_load_err:
             self.log(self._config_load_err)
         self._current_theme_is_light = False
-        self._apply_theme(self.config.get("theme", "Midnight Dark (Default)"), save=False)
+        self._apply_theme(self.config.get("theme", "Obsidian Slate (Default)"), save=False)
         self._apply_language(self.config.get("language", "English"), save=False)
         self._refresh_target_dropdown()
         self._sync_tables()
@@ -2898,8 +3076,7 @@ class FreeDnetProWindow(QMainWindow):
 
         # Clean Minimal Header Bar
         header = QFrame(objectName="HeaderBar")
-        h_lay = QHBoxLayout(header)
-        h_lay.setContentsMargins(20, 12, 20, 12)
+        h_lay = FlowLayout(header, margin=14, h_spacing=10, v_spacing=8)
 
         h_lay.addWidget(QLabel("FreeDnet", objectName="BrandTitle"))
         h_lay.addSpacing(8)
@@ -2964,12 +3141,22 @@ class FreeDnetProWindow(QMainWindow):
         r_lay.setContentsMargins(16, 14, 16, 14)
         r_lay.setSpacing(12)
 
-        r1 = QHBoxLayout()
+        r1_hdr = QHBoxLayout()
         self.lbl_chain_mode = QLabel("Chain Mode:", objectName="FieldLabel")
-        r1.addWidget(self.lbl_chain_mode)
-        self.rb_gas = QRadioButton("Via Google Apps Script (Anti-Filtering)")
-        self.rb_direct = QRadioButton("Direct to Backend (Max Speed)")
+        r1_hdr.addWidget(self.lbl_chain_mode)
+        r1_hdr.addStretch()
+        self.ip_badge = QLabel("Exit IP: Not checked yet", objectName="Muted")
+        r1_hdr.addWidget(self.ip_badge)
+        r_lay.addLayout(r1_hdr)
+
+        r1_tiles = QHBoxLayout()
+        r1_tiles.setSpacing(10)
+        self.rb_gas = QPushButton("🛡️  GAS Relay\nAnti-Filtering · Multi-Account", objectName="ModeTile")
+        self.rb_gas.setCheckable(True)
+        self.rb_direct = QPushButton("⚡  Direct Backend\nMax Speed · Low Latency", objectName="ModeTile")
+        self.rb_direct.setCheckable(True)
         self.route_grp = QButtonGroup(self)
+        self.route_grp.setExclusive(True)
         self.route_grp.addButton(self.rb_gas)
         self.route_grp.addButton(self.rb_direct)
         if self.config.get("route_mode", "gas") == "direct":
@@ -2977,20 +3164,27 @@ class FreeDnetProWindow(QMainWindow):
         else:
             self.rb_gas.setChecked(True)
         self.rb_gas.toggled.connect(self._on_route_change)
-        r1.addWidget(self.rb_gas)
-        r1.addWidget(self.rb_direct)
-        r1.addStretch()
+        r1_tiles.addWidget(self.rb_gas, stretch=1)
+        r1_tiles.addWidget(self.rb_direct, stretch=1)
+        r_lay.addLayout(r1_tiles)
 
-        self.ip_badge = QLabel("Exit IP: Not checked yet", objectName="Muted")
-        r1.addWidget(self.ip_badge)
-        r_lay.addLayout(r1)
-
-        r2 = QHBoxLayout()
+        r2_hdr = QHBoxLayout()
         self.lbl_proxy_mode = QLabel("Proxy Mode:", objectName="FieldLabel")
-        r2.addWidget(self.lbl_proxy_mode)
-        self.rb_tcp = QRadioButton("TCP Tunnel (All Apps / SOCKS5)")
-        self.rb_mitm = QRadioButton("HTTP MITM Relay (Fast Web / Browser)")
+        r2_hdr.addWidget(self.lbl_proxy_mode)
+        r2_hdr.addStretch()
+        self.install_ca_btn = QPushButton("🔒 Install CA Cert", objectName="SmallBtn")
+        self.install_ca_btn.clicked.connect(self.install_ca_certificate)
+        r2_hdr.addWidget(self.install_ca_btn)
+        r_lay.addLayout(r2_hdr)
+
+        r2_tiles = QHBoxLayout()
+        r2_tiles.setSpacing(10)
+        self.rb_tcp = QPushButton("🔌  TCP Tunnel\nAll Apps · SOCKS5 & HTTP", objectName="ModeTile")
+        self.rb_tcp.setCheckable(True)
+        self.rb_mitm = QPushButton("🚀  HTTP MITM Relay\nFast Web · 1-Hop Browser", objectName="ModeTile")
+        self.rb_mitm.setCheckable(True)
         self.proxy_mode_grp = QButtonGroup(self)
+        self.proxy_mode_grp.setExclusive(True)
         self.proxy_mode_grp.addButton(self.rb_tcp)
         self.proxy_mode_grp.addButton(self.rb_mitm)
         if self.config.get("proxy_mode", "tcp") == "mitm":
@@ -2998,13 +3192,9 @@ class FreeDnetProWindow(QMainWindow):
         else:
             self.rb_tcp.setChecked(True)
         self.rb_tcp.toggled.connect(self._on_proxy_mode_change)
-        r2.addWidget(self.rb_tcp)
-        r2.addWidget(self.rb_mitm)
-        r2.addStretch()
-        self.install_ca_btn = QPushButton("🔒 Install CA Cert", objectName="SmallBtn")
-        self.install_ca_btn.clicked.connect(self.install_ca_certificate)
-        r2.addWidget(self.install_ca_btn)
-        r_lay.addLayout(r2)
+        r2_tiles.addWidget(self.rb_tcp, stretch=1)
+        r2_tiles.addWidget(self.rb_mitm, stretch=1)
+        r_lay.addLayout(r2_tiles)
         ov_lay.addWidget(route_card)
 
         # Compact recent activity preview on Overview
@@ -3030,8 +3220,7 @@ class FreeDnetProWindow(QMainWindow):
         gas_lay.setSpacing(10)
 
         gas_toolbar = QFrame(objectName="Toolbar")
-        gt_lay = QHBoxLayout(gas_toolbar)
-        gt_lay.setContentsMargins(12, 8, 12, 8)
+        gt_lay = FlowLayout(gas_toolbar, margin=10, h_spacing=8, v_spacing=8)
         self.chk_fair_share = QCheckBox("Fair-Share Quota (1/N Equal)")
         self.chk_fair_share.setChecked(self.config.get("gas_mode", "fair") == "fair")
         self.chk_fair_share.toggled.connect(self._on_gas_mode_change)
@@ -3078,8 +3267,7 @@ class FreeDnetProWindow(QMainWindow):
         srv_lay.setSpacing(10)
 
         srv_toolbar = QFrame(objectName="Toolbar")
-        st_lay = QHBoxLayout(srv_toolbar)
-        st_lay.setContentsMargins(12, 8, 12, 8)
+        st_lay = FlowLayout(srv_toolbar, margin=10, h_spacing=8, v_spacing=8)
         self.lbl_backend_mode = QLabel("Backend Mode:", objectName="FieldLabel")
         st_lay.addWidget(self.lbl_backend_mode)
         self.target_combo = QComboBox()
@@ -3178,7 +3366,7 @@ class FreeDnetProWindow(QMainWindow):
         cfg_vlay.setContentsMargins(16, 14, 16, 14)
         cfg_vlay.setSpacing(10)
 
-        c_lay1 = QHBoxLayout()
+        c_lay1 = FlowLayout(margin=0, h_spacing=10, v_spacing=8)
         self.lbl_auth_key = QLabel("Auth Key:", objectName="FieldLabel")
         c_lay1.addWidget(self.lbl_auth_key)
         self.auth_edit = QLineEdit(self.config["auth_key"])
@@ -3202,7 +3390,7 @@ class FreeDnetProWindow(QMainWindow):
         c_lay1.addWidget(self.lbl_theme)
         self.theme_combo = QComboBox()
         self.theme_combo.addItems(list(THEMES.keys()))
-        saved_theme = self.config.get("theme", "Midnight Dark (Default)")
+        saved_theme = self.config.get("theme", "Obsidian Slate (Default)")
         if saved_theme in THEMES:
             self.theme_combo.setCurrentText(saved_theme)
         self.theme_combo.setMinimumWidth(210)
@@ -3210,7 +3398,7 @@ class FreeDnetProWindow(QMainWindow):
         c_lay1.addWidget(self.theme_combo)
         cfg_vlay.addLayout(c_lay1)
 
-        c_lay2 = QHBoxLayout()
+        c_lay2 = FlowLayout(margin=0, h_spacing=10, v_spacing=8)
         self.lbl_listen_ip = QLabel("Listen IP:", objectName="FieldLabel")
         c_lay2.addWidget(self.lbl_listen_ip)
         self.host_edit = QLineEdit(self.config["listen_host"])
@@ -3467,8 +3655,13 @@ class FreeDnetProWindow(QMainWindow):
             self.log(f"Keep Awake {'enabled' if val else 'disabled'}.")
 
     def _apply_theme(self, theme_name: str, save: bool = True):
+        theme_name = THEME_ALIASES.get(theme_name, theme_name)
         if theme_name not in THEMES:
-            theme_name = "Midnight Dark (Default)"
+            theme_name = "Obsidian Slate (Default)"
+        if hasattr(self, "theme_combo") and self.theme_combo.currentText() != theme_name:
+            self.theme_combo.blockSignals(True)
+            self.theme_combo.setCurrentText(theme_name)
+            self.theme_combo.blockSignals(False)
         theme = THEMES[theme_name]
         self._current_theme_is_light = bool(theme.get("is_light", False))
         app = QApplication.instance()
@@ -4577,21 +4770,30 @@ class FreeDnetProWindow(QMainWindow):
 
         self._sync_tables()
         now = time.time()
-        dt = max(0.1, now - self._last_stat_ts)
-        self._last_stat_ts = now
         if self.proxy and self.proxy.running:
-            tx = self.proxy.tx_bytes
-            rx = self.proxy.rx_bytes
-            tx_rate = max(0.0, (tx - self._prev_tx) / dt)
-            rx_rate = max(0.0, (rx - self._prev_rx) / dt)
-            self._prev_tx, self._prev_rx = tx, rx
-            self._peak_tx_rate = max(self._peak_tx_rate, tx_rate)
-            self._peak_rx_rate = max(self._peak_rx_rate, rx_rate)
-
             self.kpi_tunnels.setText(str(self.proxy.active_tunnels))
-            self.kpi_speed.setText(f"{fmt_rate(rx_rate)} ↓  |  {fmt_rate(tx_rate)} ↑")
-            self.kpi_peak.setText(f"{fmt_rate(self._peak_rx_rate)} ↓  |  {fmt_rate(self._peak_tx_rate)} ↑")
-            self.kpi_traffic.setText(f"{fmt_bytes(rx)} ↓  |  {fmt_bytes(tx)} ↑")
+            if now - self._last_speed_ui_ts >= 0.5:
+                dt = max(0.1, now - self._last_stat_ts)
+                self._last_stat_ts = now
+                self._last_speed_ui_ts = now
+                tx = self.proxy.tx_bytes
+                rx = self.proxy.rx_bytes
+                tx_inst = max(0.0, (tx - self._prev_tx) / dt)
+                rx_inst = max(0.0, (rx - self._prev_rx) / dt)
+                self._prev_tx, self._prev_rx = tx, rx
+                alpha = 0.45
+                self._speed_tx_ema = alpha * tx_inst + (1.0 - alpha) * self._speed_tx_ema
+                self._speed_rx_ema = alpha * rx_inst + (1.0 - alpha) * self._speed_rx_ema
+                if self._speed_tx_ema < 1.0:
+                    self._speed_tx_ema = 0.0
+                if self._speed_rx_ema < 1.0:
+                    self._speed_rx_ema = 0.0
+                self._peak_tx_rate = max(self._peak_tx_rate, self._speed_tx_ema)
+                self._peak_rx_rate = max(self._peak_rx_rate, self._speed_rx_ema)
+
+                self.kpi_speed.setText(f"{fmt_rate(self._speed_rx_ema)} ↓  |  {fmt_rate(self._speed_tx_ema)} ↑")
+                self.kpi_peak.setText(f"{fmt_rate(self._peak_rx_rate)} ↓  |  {fmt_rate(self._peak_tx_rate)} ↑")
+                self.kpi_traffic.setText(f"{fmt_bytes(rx)} ↓  |  {fmt_bytes(tx)} ↑")
             if now - self._last_save_ts > 30:
                 self._last_save_ts = now
                 try:
@@ -4599,6 +4801,8 @@ class FreeDnetProWindow(QMainWindow):
                 except Exception:
                     pass
         else:
+            self._speed_tx_ema = 0.0
+            self._speed_rx_ema = 0.0
             self.kpi_tunnels.setText("0")
             self.kpi_speed.setText("0 B/s  |  0 B/s")
 
