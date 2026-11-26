@@ -2328,7 +2328,7 @@ class FreeDnetProWindow(QMainWindow):
         self._tray_notified = False
         self._tun_ui_dirty = False
         self._pending_ip_info = None
-        self._pending_render_srv = None
+        self._pending_srv_queue: queue.Queue = queue.Queue()
         self._busy_lock = threading.Lock()
         self._busy_tasks: dict[int, str] = {}
         self._busy_seq = 0
@@ -3210,6 +3210,41 @@ class FreeDnetProWindow(QMainWindow):
             self.log(f"Removed GAS account: {removed.name}")
 
     # --- Backend Server CRUD ---
+    def _wait_until_server_live(
+        self,
+        tid: int,
+        label: str,
+        svc_url: str,
+        auth_key: str,
+        max_attempts: int = 30,
+        interval_s: float = 12.0,
+    ) -> int | None:
+        for attempt in range(1, max_attempts + 1):
+            with self._busy_lock:
+                if tid in self._busy_tasks:
+                    self._busy_tasks[tid] = f"Waiting for {label} LIVE ({attempt}/{max_attempts})..."
+            t0 = time.time()
+            res = post_direct_to_server(svc_url, {"authKey": auth_key, "action": "ping"}, auth_key, timeout=12.0)
+            lat = int((time.time() - t0) * 1000)
+            if res.get("ok"):
+                return max(1, lat)
+
+            first_gas = next((a for a in self.pool.accounts if a.enabled and a.url), None)
+            if first_gas is not None:
+                t1 = time.time()
+                res_g, _ = post_to_gas(
+                    first_gas.url,
+                    {"authKey": auth_key, "action": "ping", "serverUrl": svc_url},
+                    timeout=20.0,
+                )
+                lat_g = int((time.time() - t1) * 1000)
+                if res_g.get("ok"):
+                    return max(1, lat_g)
+
+            if attempt < max_attempts:
+                time.sleep(interval_s)
+        return None
+
     def deploy_on_render(self):
         dlg = RenderDeployDialog(self, self.auth_edit.text().strip() or "change-me-freednet-key")
         if dlg.exec() != QDialog.Accepted:
@@ -3266,8 +3301,14 @@ class FreeDnetProWindow(QMainWindow):
                     raise RuntimeError(f"Service created, but URL missing. Dashboard: {dash_url}")
 
                 label = f"Render ({params['region']})"
-                self._pending_render_srv = (label, svc_url)
-                self.log(f"Render Deploy STARTED -> {svc_url} | Region: {params['region']} | Build takes ~2-3 min ({dash_url})")
+                self.log(f"Render Deploy STARTED -> {svc_url} | Waiting for build to go LIVE (~2-3 min)...")
+                lat = self._wait_until_server_live(tid, label, svc_url, params["auth_key"], max_attempts=30, interval_s=12.0)
+                if lat is not None:
+                    self._pending_srv_queue.put((label, svc_url, lat))
+                    self.log(f"✅ {label} is LIVE & READY ({lat} ms) -> {svc_url} | Added to Backend Servers.")
+                else:
+                    self._pending_srv_queue.put((label, svc_url, 0))
+                    self.log(f"⚠️ {label} still building -> {svc_url} | Added to Backend Servers (Ping in a moment).")
             except urllib.error.HTTPError as e:
                 err_body = e.read().decode("utf-8", errors="replace")[:260]
                 self.log(f"Render Deploy FAILED (HTTP {e.code}): {err_body}")
@@ -3313,8 +3354,15 @@ class FreeDnetProWindow(QMainWindow):
                 if not svc_url:
                     raise RuntimeError(f"SnapDeploy returned no URL: {created}")
 
-                self._pending_render_srv = (f"SnapDeploy ({params['name']})", svc_url)
-                self.log(f"SnapDeploy STARTED -> {svc_url} (build takes ~2-5 min)")
+                label = f"SnapDeploy ({params['name']})"
+                self.log(f"SnapDeploy STARTED -> {svc_url} | Waiting for build to go LIVE (~2-5 min)...")
+                lat = self._wait_until_server_live(tid, label, svc_url, params["auth_key"], max_attempts=30, interval_s=12.0)
+                if lat is not None:
+                    self._pending_srv_queue.put((label, svc_url, lat))
+                    self.log(f"✅ {label} is LIVE & READY ({lat} ms) -> {svc_url} | Added to Backend Servers.")
+                else:
+                    self._pending_srv_queue.put((label, svc_url, 0))
+                    self.log(f"⚠️ {label} still building -> {svc_url} | Added to Backend Servers (Ping in a moment).")
             except urllib.error.HTTPError as e:
                 err_body = e.read().decode("utf-8", errors="replace")[:260]
                 self.log(f"SnapDeploy FAILED (HTTP {e.code}): {err_body}")
@@ -3434,8 +3482,15 @@ class FreeDnetProWindow(QMainWindow):
                     resp.read()
 
                 worker_url = f"https://{name}.{subdomain}.workers.dev"
-                self._pending_render_srv = (f"Cloudflare ({name})", worker_url)
-                self.log(f"Cloudflare Deploy OK -> {worker_url}")
+                label = f"Cloudflare ({name})"
+                self.log(f"Cloudflare uploaded -> {worker_url} | Verifying LIVE status...")
+                lat = self._wait_until_server_live(tid, label, worker_url, params["auth_key"], max_attempts=8, interval_s=3.0)
+                if lat is not None:
+                    self._pending_srv_queue.put((label, worker_url, lat))
+                    self.log(f"✅ {label} is LIVE & READY ({lat} ms) -> {worker_url} | Added to Backend Servers.")
+                else:
+                    self._pending_srv_queue.put((label, worker_url, 0))
+                    self.log(f"⚠️ {label} deployed -> {worker_url} | Added to Backend Servers (check Ping).")
             except urllib.error.HTTPError as e:
                 err_body = e.read().decode("utf-8", errors="replace")[:260]
                 self.log(f"Cloudflare Deploy FAILED (HTTP {e.code}): {err_body}")
@@ -4093,11 +4148,19 @@ class FreeDnetProWindow(QMainWindow):
             self._tun_ui_dirty = False
             self._update_tun_btn_ui()
 
-        if self._pending_render_srv is not None:
-            srv_name, srv_url = self._pending_render_srv
-            self._pending_render_srv = None
+        added_srv = False
+        while True:
+            try:
+                srv_name, srv_url, srv_lat = self._pending_srv_queue.get_nowait()
+            except queue.Empty:
+                break
+            srv_obj = BackendServer(srv_name, srv_url, True)
+            if srv_lat > 0:
+                srv_obj.last_latency_ms = srv_lat
             with self.server_pool.lock:
-                self.server_pool.servers.append(BackendServer(srv_name, srv_url, True))
+                self.server_pool.servers.append(srv_obj)
+            added_srv = True
+        if added_srv:
             self._refresh_target_dropdown()
             self._save_config()
             self._sync_tables()
