@@ -3,13 +3,14 @@
 const http = require('http');
 const net = require('net');
 const crypto = require('crypto');
+const zlib = require('zlib');
 
 const PORT = parseInt(process.env.PORT || '3000', 10);
 const AUTH_KEY = process.env.AUTH_KEY || 'change-me-freednet-key';
 const SESSION_IDLE_MS = parseInt(process.env.SESSION_IDLE_MS || '300000', 10); // 5 minutes
 const MAX_BODY_BYTES = 4 * 1024 * 1024; // 4 MB
 const MAX_READ_BUFFER_BYTES = 4 * 1024 * 1024; // 4 MB
-const MAX_SYNC_CHUNK_BYTES = 512 * 1024; // 512 KB
+const MAX_SYNC_CHUNK_BYTES = 1536 * 1024; // 1.5 MB
 
 /** @type {Map<string, {
  *   id: string,
@@ -209,24 +210,42 @@ function handleSync(body, res) {
 
   session.lastActivity = Date.now();
 
-  if (body.data && !session.closed) {
+  if ((body.dataZ || body.data) && !session.closed) {
     try {
-      const writeBuf = Buffer.from(body.data, 'base64');
+      let writeBuf;
+      if (body.dataZ) {
+        writeBuf = zlib.gunzipSync(Buffer.from(body.dataZ, 'base64'));
+      } else {
+        writeBuf = Buffer.from(body.data, 'base64');
+      }
       if (writeBuf.length > 0) {
         session.socket.write(writeBuf);
       }
     } catch (err) {
-      return sendJson(res, 400, { ok: false, error: 'Invalid base64 data' });
+      return sendJson(res, 400, { ok: false, error: 'Invalid payload data' });
     }
   }
 
   const waitMs = Math.max(0, Math.min(parseInt(body.waitMs || '0', 10) || 0, 10000));
+  const acceptGzip = Boolean(body.acceptGzip);
 
   const finish = () => {
+    if (body.txOnly) {
+      return sendJson(res, 200, { ok: true, data: '', closed: session.closed });
+    }
     const outBuf = drainSessionData(session);
     const isClosed = session.closed && session.chunks.length === 0;
     if (isClosed) {
       sessions.delete(sessionId);
+    }
+    const looksLikeTls = outBuf.length >= 2 && outBuf[0] >= 0x14 && outBuf[0] <= 0x17 && outBuf[1] === 0x03;
+    if (acceptGzip && !looksLikeTls && outBuf.length > 512 && outBuf.length <= 524288) {
+      try {
+        const gz = zlib.gzipSync(outBuf, { level: 1 });
+        if (gz.length < outBuf.length) {
+          return sendJson(res, 200, { ok: true, dataZ: gz.toString('base64'), closed: isClosed });
+        }
+      } catch (_) {}
     }
     sendJson(res, 200, {
       ok: true,
@@ -244,7 +263,11 @@ function handleSync(body, res) {
     if (done) return;
     done = true;
     clearTimeout(timer);
-    finish();
+    if (session.chunks.length > 0 && !session.closed && session.bufferedBytes < 65536) {
+      setTimeout(finish, 8);
+    } else {
+      finish();
+    }
   };
 
   const timer = setTimeout(onEvent, waitMs);
@@ -309,6 +332,9 @@ const server = http.createServer(async (req, res) => {
 
   sendJson(res, 404, { ok: false, error: 'Not found' });
 });
+
+server.keepAliveTimeout = 60000;
+server.headersTimeout = 65000;
 
 server.listen(PORT, '0.0.0.0', () => {
   console.log(`FreeDnet server listening on port ${PORT}`);
