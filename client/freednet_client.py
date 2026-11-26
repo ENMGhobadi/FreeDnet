@@ -1434,16 +1434,23 @@ if HAS_TK:
 
                 def worker_direct():
                     for srv in list(self.server_pool.servers):
-                        t0 = time.time()
-                        res = post_direct_to_server(srv.url, {"authKey": auth_key, "action": "ping"}, auth_key, timeout=45.0)
-                        lat = int((time.time() - t0) * 1000)
-                        if res.get("ok"):
-                            self.server_pool.report_success(srv, lat)
-                            self.log(f"Direct Ping OK [{srv.name}]: {lat} ms (active: {res.get('activeSessions', 0)})")
-                        else:
-                            detail = f" | {res.get('detail')}" if res.get("detail") else ""
+                        for attempt in range(5):
+                            t0 = time.time()
+                            res = post_direct_to_server(srv.url, {"authKey": auth_key, "action": "ping"}, auth_key, timeout=45.0)
+                            lat = int((time.time() - t0) * 1000)
+                            if res.get("ok"):
+                                self.server_pool.report_success(srv, lat)
+                                self.log(f"Direct Ping OK [{srv.name}]: {lat} ms (active: {res.get('activeSessions', 0)})")
+                                break
+                            det = str(res.get("detail") or "")
+                            if ("Waking up" in det or res.get("error") == "HTTP 503") and attempt < 4:
+                                self.log(f"Backend [{srv.name}] is waking up (503), waiting 10s ({attempt + 1}/4)...")
+                                time.sleep(10)
+                                continue
+                            detail = f" | {det}" if det else ""
                             self.server_pool.report_failure(srv, res.get("error", "Error"))
                             self.log(f"Direct Ping FAILED [{srv.name}]: {res.get('error')}{detail}")
+                            break
 
                 threading.Thread(target=worker_direct, daemon=True).start()
                 return
@@ -1474,18 +1481,27 @@ if HAS_TK:
                 if any(s is not None for s in servers):
                     first_gas = next((a for a in self.pool.accounts if a.enabled), self.pool.accounts[0])
                     for srv in list(self.server_pool.servers):
-                        t0 = time.time()
-                        res, _ = post_to_gas(
-                            first_gas.url, {"authKey": auth_key, "action": "ping", "serverUrl": srv.url}, timeout=45.0
-                        )
-                        lat = int((time.time() - t0) * 1000)
-                        if res.get("ok"):
-                            self.server_pool.report_success(srv, lat)
-                            self.log(f"Backend OK [{srv.name}]: {lat} ms (active: {res.get('activeSessions', 0)})")
-                        else:
-                            detail = f" | {res.get('detail')}" if res.get("detail") else ""
+                        for attempt in range(5):
+                            t0 = time.time()
+                            res, _ = post_to_gas(
+                                first_gas.url, {"authKey": auth_key, "action": "ping", "serverUrl": srv.url}, timeout=45.0
+                            )
+                            lat = int((time.time() - t0) * 1000)
+                            if res.get("ok"):
+                                self.server_pool.report_success(srv, lat)
+                                via = f" -> {res.get('relayedTo')}" if res.get("relayedTo") else ""
+                                self.log(f"Backend OK [{srv.name}]: {lat} ms (active: {res.get('activeSessions', 0)}){via}")
+                                break
+                            det = str(res.get("detail") or "")
+                            if ("Waking up" in det or "HTTP 503" in str(res.get("error", ""))) and attempt < 4:
+                                self.log(f"Backend [{srv.name}] is waking up (503), waiting 10s ({attempt + 1}/4)...")
+                                time.sleep(10)
+                                continue
+                            detail = f" | {det}" if det else ""
+                            via = f" -> {res.get('relayedTo')}" if res.get("relayedTo") else ""
                             self.server_pool.report_failure(srv, res.get("error", "Error"))
-                            self.log(f"Backend FAILED [{srv.name}]: {res.get('error')}{detail}")
+                            self.log(f"Backend FAILED [{srv.name}]: {res.get('error')}{detail}{via}")
+                            break
 
             threading.Thread(target=worker, daemon=True).start()
 

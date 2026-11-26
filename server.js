@@ -121,7 +121,8 @@ function handleOpen(body, res) {
   }
 
   const sessionId = crypto.randomUUID();
-  const socket = net.createConnection({ host: targetHost, port: targetPort });
+  const family = net.isIP(targetHost) === 6 ? 6 : 4;
+  const socket = net.createConnection({ host: targetHost, port: targetPort, family });
   socket.setNoDelay(true);
 
   const session = {
@@ -141,7 +142,7 @@ function handleOpen(body, res) {
     if (!responded) {
       responded = true;
       closeSession(sessionId);
-      sendJson(res, 504, { ok: false, error: 'Target connection timeout' });
+      sendJson(res, 504, { ok: false, targetError: true, error: 'Target connection timeout' });
     }
   }, 15000);
 
@@ -188,7 +189,7 @@ function handleOpen(body, res) {
     if (!responded) {
       responded = true;
       sessions.delete(sessionId);
-      sendJson(res, 502, { ok: false, error: err.message });
+      sendJson(res, 502, { ok: false, targetError: true, error: err.message });
     }
   });
 

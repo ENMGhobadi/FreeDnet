@@ -58,6 +58,12 @@ function doPost(e) {
     const text = response.getContentText();
 
     if (code < 200 || code >= 300) {
+      let parsedErr = null;
+      try { parsedErr = JSON.parse(text); } catch (_) {}
+      if (parsedErr && parsedErr.targetError) {
+        parsedErr.relayedTo = targetUrl;
+        return jsonResponse(parsedErr);
+      }
       return jsonResponse({
         ok: false,
         upstreamError: true,
