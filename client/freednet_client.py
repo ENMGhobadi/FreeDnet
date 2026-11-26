@@ -947,10 +947,11 @@ class FreeDnetProxyServer:
                 return
 
 from PySide6.QtCore import Qt, QTimer
-from PySide6.QtGui import QColor, QFont
+from PySide6.QtGui import QAction, QColor
 from PySide6.QtWidgets import (
     QAbstractItemView,
     QApplication,
+    QButtonGroup,
     QCheckBox,
     QComboBox,
     QDialog,
@@ -962,10 +963,10 @@ from PySide6.QtWidgets import (
     QLabel,
     QLineEdit,
     QMainWindow,
+    QMenu,
     QMessageBox,
     QPushButton,
     QRadioButton,
-    QButtonGroup,
     QTabWidget,
     QTableWidget,
     QTableWidgetItem,
@@ -1029,7 +1030,7 @@ QLabel#KpiTitle {
 }
 QLabel#KpiValue {
     color: #f8fafc;
-    font-size: 17px;
+    font-size: 16px;
     font-weight: 700;
 }
 QLabel#StatusPillStopped {
@@ -1113,10 +1114,6 @@ QRadioButton, QCheckBox {
     spacing: 7px;
     font-weight: 500;
 }
-QRadioButton::indicator, QCheckBox::indicator {
-    width: 16px;
-    height: 16px;
-}
 QTabWidget::pane {
     border: 1px solid #1e293b;
     border-radius: 10px;
@@ -1130,7 +1127,7 @@ QTabBar::tab {
     border-bottom: none;
     border-top-left-radius: 8px;
     border-top-right-radius: 8px;
-    padding: 8px 18px;
+    padding: 9px 20px;
     margin-right: 4px;
     font-weight: 600;
 }
@@ -1152,7 +1149,7 @@ QTableWidget {
 QHeaderView::section {
     background-color: #131c31;
     color: #94a3b8;
-    padding: 7px 8px;
+    padding: 8px;
     border: none;
     border-bottom: 1px solid #1e293b;
     font-weight: 700;
@@ -1165,7 +1162,22 @@ QTextEdit#LogConsole {
     border-radius: 8px;
     font-family: "Cascadia Code", "Consolas", monospace;
     font-size: 12px;
-    padding: 8px;
+    padding: 10px;
+}
+QMenu {
+    background-color: #0f172a;
+    color: #e2e8f0;
+    border: 1px solid #334155;
+    border-radius: 8px;
+    padding: 6px;
+}
+QMenu::item {
+    padding: 7px 18px;
+    border-radius: 5px;
+}
+QMenu::item:selected {
+    background-color: #2563eb;
+    color: #ffffff;
 }
 QDialog {
     background-color: #0f172a;
@@ -1212,9 +1224,9 @@ class FreeDnetProWindow(QMainWindow):
 
     def __init__(self):
         super().__init__()
-        self.setWindowTitle("FreeDnet Pro — Next-Gen Smart Proxy Router")
-        self.resize(1120, 820)
-        self.setMinimumSize(960, 680)
+        self.setWindowTitle("FreeDnet Pro — Smart Proxy Router")
+        self.resize(980, 640)
+        self.setMinimumSize(860, 560)
 
         self.config = self._load_config()
         preset = self.config.get("quota_preset", DEFAULT_PRESET)
@@ -1302,50 +1314,47 @@ class FreeDnetProWindow(QMainWindow):
         outer.setContentsMargins(0, 0, 0, 0)
         outer.setSpacing(0)
 
-        # Header Bar
+        # Clean Minimal Header Bar
         header = QFrame(objectName="HeaderBar")
         h_lay = QHBoxLayout(header)
-        h_lay.setContentsMargins(20, 14, 20, 14)
+        h_lay.setContentsMargins(20, 12, 20, 12)
 
-        brand = QLabel("FreeDnet", objectName="BrandTitle")
-        pro_badge = QLabel("PRO", objectName="ProBadge")
-        sub = QLabel("Next-Gen Multi-GAS & Multi-Server Router", objectName="Muted")
-        h_lay.addWidget(brand)
+        h_lay.addWidget(QLabel("FreeDnet", objectName="BrandTitle"))
         h_lay.addSpacing(8)
-        h_lay.addWidget(pro_badge)
+        h_lay.addWidget(QLabel("PRO", objectName="ProBadge"))
         h_lay.addSpacing(12)
-        h_lay.addWidget(sub)
+        h_lay.addWidget(QLabel("Smart Tunnel & Multi-Relay Router", objectName="Muted"))
         h_lay.addStretch()
 
         self.status_pill = QLabel("● STOPPED", objectName="StatusPillStopped")
-        self.ping_btn = QPushButton("Ping All")
-        self.e2e_btn = QPushButton("Test E2E")
-        self.country_btn = QPushButton("Country Check")
         self.tun_btn = QPushButton("TUN Mode: OFF")
         self.start_btn = QPushButton("▶  Start Proxy", objectName="PrimaryBtn")
 
-        self.ping_btn.clicked.connect(self.test_all_accounts)
-        self.e2e_btn.clicked.connect(self.test_proxy_e2e)
-        self.country_btn.clicked.connect(self.check_country_ip)
         self.tun_btn.clicked.connect(self.toggle_tun_mode)
         self.start_btn.clicked.connect(self.toggle_proxy)
 
         h_lay.addWidget(self.status_pill)
         h_lay.addSpacing(10)
-        h_lay.addWidget(self.ping_btn)
-        h_lay.addWidget(self.e2e_btn)
-        h_lay.addWidget(self.country_btn)
         h_lay.addWidget(self.tun_btn)
         h_lay.addWidget(self.start_btn)
         outer.addWidget(header)
 
-        # Content Body
+        # Main Tabbed Workspace
         body = QVBoxLayout()
-        body.setContentsMargins(18, 16, 18, 16)
-        body.setSpacing(12)
+        body.setContentsMargins(16, 14, 16, 14)
         outer.addLayout(body)
 
-        # 5 KPI Cards Row (Usage, Live Speed, Peak Speed, Total Traffic, Pool)
+        self.tabs = QTabWidget()
+        body.addWidget(self.tabs, stretch=1)
+
+        # ==========================================================
+        # TAB 1: OVERVIEW (KPIs + Routing + Quick Diagnostics)
+        # ==========================================================
+        ov_tab = QWidget()
+        ov_lay = QVBoxLayout(ov_tab)
+        ov_lay.setContentsMargins(16, 16, 16, 16)
+        ov_lay.setSpacing(14)
+
         kpi_row = QHBoxLayout()
         kpi_row.setSpacing(10)
         self.kpi_tunnels = self._make_kpi_card(kpi_row, "ACTIVE TUNNELS", "0")
@@ -1353,18 +1362,17 @@ class FreeDnetProWindow(QMainWindow):
         self.kpi_peak = self._make_kpi_card(kpi_row, "PEAK SPEED (↓ / ↑)", "0 B/s  |  0 B/s")
         self.kpi_traffic = self._make_kpi_card(kpi_row, "TOTAL USAGE (↓ / ↑)", "0 B  |  0 B")
         self.kpi_pool = self._make_kpi_card(kpi_row, "POOL HEALTH", "GAS 0 | SRV 0")
-        body.addLayout(kpi_row)
+        ov_lay.addLayout(kpi_row)
 
-        # Routing & Connection Card
-        cfg_card = QFrame(objectName="Card")
-        cfg_lay = QVBoxLayout(cfg_card)
-        cfg_lay.setContentsMargins(16, 14, 16, 14)
-        cfg_lay.setSpacing(12)
+        route_card = QFrame(objectName="Card")
+        r_lay = QVBoxLayout(route_card)
+        r_lay.setContentsMargins(16, 14, 16, 14)
+        r_lay.setSpacing(12)
 
-        row1 = QHBoxLayout()
-        row1.addWidget(QLabel("Chain Mode:", objectName="FieldLabel"))
-        self.rb_gas = QRadioButton("Via Google Apps Script")
-        self.rb_direct = QRadioButton("Direct to Backend")
+        r1 = QHBoxLayout()
+        r1.addWidget(QLabel("Chain Mode:", objectName="FieldLabel"))
+        self.rb_gas = QRadioButton("Via Google Apps Script (Anti-Filtering)")
+        self.rb_direct = QRadioButton("Direct to Backend (Max Speed)")
         self.route_grp = QButtonGroup(self)
         self.route_grp.addButton(self.rb_gas)
         self.route_grp.addButton(self.rb_direct)
@@ -1373,68 +1381,57 @@ class FreeDnetProWindow(QMainWindow):
         else:
             self.rb_gas.setChecked(True)
         self.rb_gas.toggled.connect(self._on_route_change)
+        r1.addWidget(self.rb_gas)
+        r1.addWidget(self.rb_direct)
+        r1.addStretch()
 
-        row1.addWidget(self.rb_gas)
-        row1.addWidget(self.rb_direct)
-        row1.addStretch()
-
-        row1.addWidget(QLabel("Backend Mode:", objectName="FieldLabel"))
+        r1.addWidget(QLabel("Backend Mode:", objectName="FieldLabel"))
         self.target_combo = QComboBox()
-        self.target_combo.setMinimumWidth(240)
+        self.target_combo.setMinimumWidth(250)
         self.target_combo.currentTextChanged.connect(self._on_target_change)
-        row1.addWidget(self.target_combo)
-        cfg_lay.addLayout(row1)
+        r1.addWidget(self.target_combo)
+        r_lay.addLayout(r1)
 
-        row2 = QHBoxLayout()
-        row2.addWidget(QLabel("Auth Key:", objectName="FieldLabel"))
-        self.auth_edit = QLineEdit(self.config["auth_key"])
-        self.auth_edit.setEchoMode(QLineEdit.Password)
-        self.auth_edit.setMinimumWidth(220)
-        row2.addWidget(self.auth_edit)
+        diag_row = QHBoxLayout()
+        self.ping_btn = QPushButton("Ping All Relays & Servers")
+        self.e2e_btn = QPushButton("Test Proxy (E2E)")
+        self.country_btn = QPushButton("Country / IP Check")
+        self.ping_btn.clicked.connect(self.test_all_accounts)
+        self.e2e_btn.clicked.connect(self.test_proxy_e2e)
+        self.country_btn.clicked.connect(self.check_country_ip)
+        diag_row.addWidget(self.ping_btn)
+        diag_row.addWidget(self.e2e_btn)
+        diag_row.addWidget(self.country_btn)
+        diag_row.addStretch()
+        self.ip_badge = QLabel("Exit IP: Not checked yet", objectName="Muted")
+        diag_row.addWidget(self.ip_badge)
+        r_lay.addLayout(diag_row)
+        ov_lay.addWidget(route_card)
 
-        self.chk_show_key = QCheckBox("Show")
-        self.chk_show_key.toggled.connect(
-            lambda checked: self.auth_edit.setEchoMode(QLineEdit.Normal if checked else QLineEdit.Password)
-        )
-        row2.addWidget(self.chk_show_key)
+        # Compact recent activity preview on Overview
+        ov_log_hdr = QHBoxLayout()
+        ov_log_hdr.addWidget(QLabel("Recent Activity", objectName="FieldLabel"))
+        ov_log_hdr.addStretch()
+        ov_log_hdr.addWidget(QLabel("Tip: Right-click any account or server row for actions", objectName="Muted"))
+        ov_lay.addLayout(ov_log_hdr)
 
-        paste_btn = QPushButton("Paste", objectName="SmallBtn")
-        paste_btn.clicked.connect(self._paste_auth_key)
-        row2.addWidget(paste_btn)
-        row2.addStretch()
+        self.ov_log_preview = QTextEdit(objectName="LogConsole")
+        self.ov_log_preview.setReadOnly(True)
+        ov_lay.addWidget(self.ov_log_preview, stretch=1)
+        self.tabs.addTab(ov_tab, "Overview")
 
-        row2.addWidget(QLabel("Listen IP:", objectName="FieldLabel"))
-        self.host_edit = QLineEdit(self.config["listen_host"])
-        self.host_edit.setFixedWidth(120)
-        row2.addWidget(self.host_edit)
-
-        row2.addWidget(QLabel("Port:", objectName="FieldLabel"))
-        self.port_edit = QLineEdit(str(self.config["listen_port"]))
-        self.port_edit.setFixedWidth(72)
-        row2.addWidget(self.port_edit)
-
-        self.chk_keep_awake = QCheckBox("Keep Awake (10m)")
-        self.chk_keep_awake.setChecked(bool(self.config.get("keep_awake", True)))
-        self.chk_keep_awake.toggled.connect(self._on_keep_awake_change)
-        row2.addWidget(self.chk_keep_awake)
-
-        cfg_lay.addLayout(row2)
-        body.addWidget(cfg_card)
-
-        # Tabs: GAS Accounts & Backend Servers
-        self.tabs = QTabWidget()
-        body.addWidget(self.tabs, stretch=1)
-
-        # Tab 1: GAS Accounts
+        # ==========================================================
+        # TAB 2: GAS ACCOUNTS (Clean toolbar + Right-click menu)
+        # ==========================================================
         gas_tab = QWidget()
         gas_lay = QVBoxLayout(gas_tab)
-        gas_lay.setContentsMargins(14, 14, 14, 14)
+        gas_lay.setContentsMargins(16, 16, 16, 16)
         gas_lay.setSpacing(10)
 
         gas_toolbar = QFrame(objectName="Toolbar")
         gt_lay = QHBoxLayout(gas_toolbar)
         gt_lay.setContentsMargins(12, 8, 12, 8)
-        self.chk_fair_share = QCheckBox("Fair-Share Quota Distribution (1/N Equal across enabled accounts)")
+        self.chk_fair_share = QCheckBox("Fair-Share Quota (1/N Equal)")
         self.chk_fair_share.setChecked(self.config.get("gas_mode", "fair") == "fair")
         self.chk_fair_share.toggled.connect(self._on_gas_mode_change)
         gt_lay.addWidget(self.chk_fair_share)
@@ -1446,81 +1443,206 @@ class FreeDnetProWindow(QMainWindow):
         init_preset = self.config.get("quota_preset", DEFAULT_PRESET)
         if init_preset in GAS_QUOTA_PRESETS:
             self.preset_combo.setCurrentText(init_preset)
-        self.preset_combo.setMinimumWidth(290)
+        self.preset_combo.setMinimumWidth(275)
         self.preset_combo.currentTextChanged.connect(self._on_preset_change)
         gt_lay.addWidget(self.preset_combo)
+
+        add_g = QPushButton("+ Add GAS", objectName="PrimaryBtn")
+        add_g.clicked.connect(self.add_account)
+        gt_lay.addSpacing(8)
+        gt_lay.addWidget(add_g)
         gas_lay.addWidget(gas_toolbar)
 
         self.gas_table = self._make_table(["#", "Account", "Status", "Active", "Daily Quota", "Share %", "Latency", "GAS Web App URL"])
+        self.gas_table.setContextMenuPolicy(Qt.CustomContextMenu)
+        self.gas_table.customContextMenuRequested.connect(self._show_gas_context_menu)
+        self.gas_table.doubleClicked.connect(lambda _: self.edit_account())
         gas_lay.addWidget(self.gas_table, stretch=1)
+        gas_lay.addWidget(QLabel("Right-click any row to Edit, Enable/Disable, Reorder, Ping, or Remove.", objectName="Muted"))
+        self.tabs.addTab(gas_tab, "GAS Accounts")
 
-        g_btns = QHBoxLayout()
-        add_g = QPushButton("+ Add GAS Account", objectName="PrimaryBtn")
-        add_g.clicked.connect(self.add_account)
-        edit_g = QPushButton("Edit")
-        edit_g.clicked.connect(self.edit_account)
-        tog_g = QPushButton("Enable / Disable")
-        tog_g.clicked.connect(self.toggle_account)
-        up_g = QPushButton("▲ Up")
-        up_g.clicked.connect(lambda: self.move_account(-1))
-        dn_g = QPushButton("▼ Down")
-        dn_g.clicked.connect(lambda: self.move_account(1))
-        rem_g = QPushButton("Remove")
-        rem_g.clicked.connect(self.remove_account)
-        for b in (add_g, edit_g, tog_g, up_g, dn_g, rem_g):
-            g_btns.addWidget(b)
-        g_btns.addStretch()
-        gas_lay.addLayout(g_btns)
-        self.tabs.addTab(gas_tab, "Google Apps Script Accounts")
-
-        # Tab 2: Backend Servers
+        # ==========================================================
+        # TAB 3: BACKEND SERVERS (Clean toolbar + Right-click menu)
+        # ==========================================================
         srv_tab = QWidget()
         srv_lay = QVBoxLayout(srv_tab)
-        srv_lay.setContentsMargins(14, 14, 14, 14)
+        srv_lay.setContentsMargins(16, 16, 16, 16)
         srv_lay.setSpacing(10)
 
-        self.srv_table = self._make_table(["#", "Server Name", "Status", "Requests", "Errors", "Latency", "Server URL"])
-        srv_lay.addWidget(self.srv_table, stretch=1)
-
-        s_btns = QHBoxLayout()
+        srv_toolbar = QFrame(objectName="Toolbar")
+        st_lay = QHBoxLayout(srv_toolbar)
+        st_lay.setContentsMargins(12, 8, 12, 8)
+        st_lay.addWidget(QLabel("Manage Render, SnappDeploy & Oracle containers (Right-click row for quick actions)", objectName="Muted"))
+        st_lay.addStretch()
         add_s = QPushButton("+ Add Server", objectName="PrimaryBtn")
         add_s.clicked.connect(self.add_server)
-        edit_s = QPushButton("Edit")
-        edit_s.clicked.connect(self.edit_server)
-        tog_s = QPushButton("Enable / Disable")
-        tog_s.clicked.connect(self.toggle_server)
-        up_s = QPushButton("▲ Up")
-        up_s.clicked.connect(lambda: self.move_server(-1))
-        dn_s = QPushButton("▼ Down")
-        dn_s.clicked.connect(lambda: self.move_server(1))
-        rem_s = QPushButton("Remove")
-        rem_s.clicked.connect(self.remove_server)
-        for b in (add_s, edit_s, tog_s, up_s, dn_s, rem_s):
-            s_btns.addWidget(b)
-        s_btns.addStretch()
-        srv_lay.addLayout(s_btns)
-        self.tabs.addTab(srv_tab, "Backend Servers (Render / SnappDeploy / Oracle)")
+        st_lay.addWidget(add_s)
+        srv_lay.addWidget(srv_toolbar)
 
-        # Activity Log Card
-        log_card = QFrame(objectName="Card")
-        log_lay = QVBoxLayout(log_card)
-        log_lay.setContentsMargins(14, 10, 14, 12)
-        log_lay.setSpacing(6)
+        self.srv_table = self._make_table(["#", "Server Name", "Status", "Requests", "Errors", "Latency", "Server URL"])
+        self.srv_table.setContextMenuPolicy(Qt.CustomContextMenu)
+        self.srv_table.customContextMenuRequested.connect(self._show_srv_context_menu)
+        self.srv_table.doubleClicked.connect(lambda _: self.edit_server())
+        srv_lay.addWidget(self.srv_table, stretch=1)
+        self.tabs.addTab(srv_tab, "Backend Servers")
+
+        # ==========================================================
+        # TAB 4: SETTINGS & FULL LOGS
+        # ==========================================================
+        set_tab = QWidget()
+        set_lay = QVBoxLayout(set_tab)
+        set_lay.setContentsMargins(16, 16, 16, 16)
+        set_lay.setSpacing(12)
+
+        cfg_card = QFrame(objectName="Card")
+        c_lay = QHBoxLayout(cfg_card)
+        c_lay.setContentsMargins(16, 14, 16, 14)
+
+        c_lay.addWidget(QLabel("Auth Key:", objectName="FieldLabel"))
+        self.auth_edit = QLineEdit(self.config["auth_key"])
+        self.auth_edit.setEchoMode(QLineEdit.Password)
+        self.auth_edit.setMinimumWidth(200)
+        c_lay.addWidget(self.auth_edit)
+
+        self.chk_show_key = QCheckBox("Show")
+        self.chk_show_key.toggled.connect(
+            lambda checked: self.auth_edit.setEchoMode(QLineEdit.Normal if checked else QLineEdit.Password)
+        )
+        c_lay.addWidget(self.chk_show_key)
+
+        paste_btn = QPushButton("Paste", objectName="SmallBtn")
+        paste_btn.clicked.connect(self._paste_auth_key)
+        c_lay.addWidget(paste_btn)
+        c_lay.addStretch()
+
+        c_lay.addWidget(QLabel("Listen IP:", objectName="FieldLabel"))
+        self.host_edit = QLineEdit(self.config["listen_host"])
+        self.host_edit.setFixedWidth(115)
+        c_lay.addWidget(self.host_edit)
+
+        c_lay.addWidget(QLabel("Port:", objectName="FieldLabel"))
+        self.port_edit = QLineEdit(str(self.config["listen_port"]))
+        self.port_edit.setFixedWidth(68)
+        c_lay.addWidget(self.port_edit)
+
+        self.chk_keep_awake = QCheckBox("Keep Awake (10m)")
+        self.chk_keep_awake.setChecked(bool(self.config.get("keep_awake", True)))
+        self.chk_keep_awake.toggled.connect(self._on_keep_awake_change)
+        c_lay.addWidget(self.chk_keep_awake)
+        set_lay.addWidget(cfg_card)
 
         log_hdr = QHBoxLayout()
-        log_hdr.addWidget(QLabel("Activity Log", objectName="FieldLabel"))
+        log_hdr.addWidget(QLabel("Full Activity Log", objectName="FieldLabel"))
         log_hdr.addStretch()
-        log_hdr.addWidget(QLabel("Free Gmail limit: 30 concurrent / 20k per day", objectName="Muted"))
+        cpy_btn = QPushButton("Copy Logs", objectName="SmallBtn")
+        cpy_btn.clicked.connect(lambda: QApplication.clipboard().setText(self.log_console.toPlainText()))
         clr_btn = QPushButton("Clear", objectName="SmallBtn")
-        clr_btn.clicked.connect(lambda: self.log_console.clear())
+        clr_btn.clicked.connect(lambda: (self.log_console.clear(), self.ov_log_preview.clear()))
+        log_hdr.addWidget(cpy_btn)
         log_hdr.addWidget(clr_btn)
-        log_lay.addLayout(log_hdr)
+        set_lay.addLayout(log_hdr)
 
         self.log_console = QTextEdit(objectName="LogConsole")
         self.log_console.setReadOnly(True)
-        self.log_console.setFixedHeight(140)
-        log_lay.addWidget(self.log_console)
-        body.addWidget(log_card)
+        set_lay.addWidget(self.log_console, stretch=1)
+        self.tabs.addTab(set_tab, "Settings & Logs")
+
+    def _show_gas_context_menu(self, pos):
+        row = self.gas_table.rowAt(pos.y())
+        if row < 0 or row >= len(self.pool.accounts):
+            return
+        self.gas_table.selectRow(row)
+        acc = self.pool.accounts[row]
+        menu = QMenu(self)
+        menu.addAction("Edit Account", self.edit_account)
+        menu.addAction("Disable" if acc.enabled else "Enable", self.toggle_account)
+        menu.addAction("Ping This Account", lambda: self._ping_single_gas(row))
+        menu.addSeparator()
+        menu.addAction("Move Up (▲)", lambda: self.move_account(-1))
+        menu.addAction("Move Down (▼)", lambda: self.move_account(1))
+        menu.addSeparator()
+        menu.addAction("Remove", self.remove_account)
+        menu.exec(self.gas_table.viewport().mapToGlobal(pos))
+
+    def _show_srv_context_menu(self, pos):
+        row = self.srv_table.rowAt(pos.y())
+        if row < 0 or row >= len(self.server_pool.servers):
+            return
+        self.srv_table.selectRow(row)
+        srv = self.server_pool.servers[row]
+        menu = QMenu(self)
+        menu.addAction("Edit Server", self.edit_server)
+        menu.addAction("Disable" if srv.enabled else "Enable", self.toggle_server)
+        menu.addAction(f"Lock Output to Only: {srv.name}", lambda: self._lock_only_server(srv.name))
+        menu.addAction("Ping This Server", lambda: self._ping_single_server(row))
+        menu.addSeparator()
+        menu.addAction("Move Up (▲)", lambda: self.move_server(-1))
+        menu.addAction("Move Down (▼)", lambda: self.move_server(1))
+        menu.addSeparator()
+        menu.addAction("Remove", self.remove_server)
+        menu.exec(self.srv_table.viewport().mapToGlobal(pos))
+
+    def _lock_only_server(self, name: str):
+        self.server_pool.set_mode(f"only:{name}")
+        self._refresh_target_dropdown()
+        self._save_config()
+        self.log(f"Locked Backend Mode to Only: {name}")
+
+    def _ping_single_gas(self, row: int):
+        if not (0 <= row < len(self.pool.accounts)):
+            return
+        acc = self.pool.accounts[row]
+        auth_key = self.auth_edit.text().strip()
+        servers = self.server_pool.get_candidates()
+        srv = servers[0]
+
+        def worker():
+            payload = {"authKey": auth_key, "action": "ping"}
+            if srv is not None:
+                payload["serverUrl"] = srv.url
+            t0 = time.time()
+            res, _ = post_to_gas(acc.url, payload, timeout=45.0)
+            lat = int((time.time() - t0) * 1000)
+            if res.get("ok"):
+                acc.last_latency_ms = lat
+                acc.last_error = ""
+                self.log(f"GAS Ping OK [{acc.name}]: {lat} ms")
+            else:
+                acc.last_error = res.get("error", "Error")
+                self.log(f"GAS Ping FAILED [{acc.name}]: {acc.last_error}")
+
+        threading.Thread(target=worker, daemon=True).start()
+
+    def _ping_single_server(self, row: int):
+        if not (0 <= row < len(self.server_pool.servers)):
+            return
+        srv = self.server_pool.servers[row]
+        auth_key = self.auth_edit.text().strip()
+        direct = self.rb_direct.isChecked()
+
+        def worker():
+            for attempt in range(7):
+                t0 = time.time()
+                if direct or not self.pool.accounts:
+                    res = post_direct_to_server(srv.url, {"authKey": auth_key, "action": "ping"}, auth_key, timeout=45.0)
+                else:
+                    first_gas = next((a for a in self.pool.accounts if a.enabled), self.pool.accounts[0])
+                    res, _ = post_to_gas(first_gas.url, {"authKey": auth_key, "action": "ping", "serverUrl": srv.url}, timeout=45.0)
+                lat = int((time.time() - t0) * 1000)
+                if res.get("ok"):
+                    self.server_pool.report_success(srv, lat)
+                    self.log(f"Backend OK [{srv.name}]: {lat} ms (active: {res.get('activeSessions', 0)})")
+                    return
+                det = str(res.get("detail") or "")
+                if ("Waking up" in det or "503" in str(res.get("error", ""))) and attempt < 6:
+                    self.log(f"Backend [{srv.name}] is waking up (503), waiting 10s ({attempt + 1}/6)...")
+                    time.sleep(10)
+                    continue
+                self.server_pool.report_failure(srv, res.get("error", "Error"))
+                self.log(f"Backend FAILED [{srv.name}]: {res.get('error')}")
+                return
+
+        threading.Thread(target=worker, daemon=True).start()
 
     def _make_kpi_card(self, parent_layout, title: str, initial: str) -> QLabel:
         card = QFrame(objectName="KpiCard")
@@ -1947,6 +2069,7 @@ class FreeDnetProWindow(QMainWindow):
                     if city:
                         loc = f"{loc} - {city}"
                     self.log(f"Country Check OK [{name}]: IP={ip} | {loc} | {isp}")
+                    QTimer.singleShot(0, lambda t=f"Exit IP: {ip} ({loc})": self.ip_badge.setText(t))
                     return
                 except Exception as e:
                     self.log(f"Country Check [{name}] failed ({e}), trying next...")
@@ -2178,12 +2301,14 @@ class FreeDnetProWindow(QMainWindow):
         if lines:
             for ln in lines:
                 self.log_console.append(ln)
-            doc = self.log_console.document()
-            if doc.blockCount() > 500:
-                cursor = self.log_console.textCursor()
-                cursor.movePosition(cursor.Start)
-                cursor.movePosition(cursor.Down, cursor.KeepAnchor, doc.blockCount() - 400)
-                cursor.removeSelectedText()
+                self.ov_log_preview.append(ln)
+            for box, max_b, keep_b in ((self.log_console, 500, 400), (self.ov_log_preview, 120, 80)):
+                doc = box.document()
+                if doc.blockCount() > max_b:
+                    cursor = box.textCursor()
+                    cursor.movePosition(cursor.Start)
+                    cursor.movePosition(cursor.Down, cursor.KeepAnchor, doc.blockCount() - keep_b)
+                    cursor.removeSelectedText()
 
         self._sync_tables()
         now = time.time()
