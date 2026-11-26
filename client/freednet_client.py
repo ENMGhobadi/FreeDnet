@@ -1349,6 +1349,9 @@ class FreeDnetProWindow(QMainWindow):
         self.ui_timer.timeout.connect(self._on_ui_tick)
         self.ui_timer.start(200)
 
+        if "--auto-tun" in sys.argv:
+            QTimer.singleShot(350, self.toggle_tun_mode)
+
     def _load_config(self) -> dict:
         if os.path.exists(CONFIG_PATH):
             try:
@@ -2491,21 +2494,22 @@ class FreeDnetProWindow(QMainWindow):
             QMessageBox.information(self, "Windows Only", "Wintun TUN Mode is designed for Windows 10/11 x64.")
             return
 
-        if not (self.proxy and self.proxy.running):
-            QMessageBox.warning(self, "Start Proxy First", "Please click 'Start Proxy' before enabling TUN Mode.")
-            return
-
         if not is_windows_admin():
             res = QMessageBox.question(
                 self,
                 "Administrator Required",
-                "Creating the FreeDnetTUN virtual network adapter requires Administrator privileges.\nRestart FreeDnet as Administrator now?",
+                "Creating the FreeDnetTUN virtual network adapter requires Administrator privileges.\nRestart FreeDnet as Administrator and auto-start TUN now?",
             )
             if res == QMessageBox.Yes:
-                launch_arg = "" if getattr(sys, "frozen", False) else f'"{os.path.abspath(__file__)}"'
+                launch_arg = "--auto-tun" if getattr(sys, "frozen", False) else f'"{os.path.abspath(__file__)}" --auto-tun'
                 ctypes.windll.shell32.ShellExecuteW(None, "runas", sys.executable, launch_arg, BASE_DIR, 1)
-                self.close()
+                self._quit_app()
             return
+
+        if not (self.proxy and self.proxy.running):
+            self.toggle_proxy()
+            if not (self.proxy and self.proxy.running):
+                return
 
         self.tun_btn.setEnabled(False)
         self.tun_btn.setText("Starting TUN...")
