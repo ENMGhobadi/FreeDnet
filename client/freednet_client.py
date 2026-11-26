@@ -12,20 +12,65 @@ import base64
 from collections import deque
 import ctypes
 import datetime
+import http.client
+import io
 import json
 import os
 import queue
 import socket
+import ssl
 import struct
+import subprocess
 import sys
 import threading
 import time
 import urllib.error
+import urllib.parse
 import urllib.request
+import zipfile
 
 
 
-CONFIG_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "config.json")
+BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+CONFIG_PATH = os.path.join(BASE_DIR, "config.json")
+XRAY_DIR = os.path.join(BASE_DIR, "xray")
+XRAY_EXE = os.path.join(XRAY_DIR, "xray.exe")
+WINTUN_DLL = os.path.join(XRAY_DIR, "wintun.dll")
+XRAY_TUN_CFG = os.path.join(XRAY_DIR, "tun_config.json")
+XRAY_ZIP_URL = "https://github.com/XTLS/Xray-core/releases/latest/download/Xray-windows-64.zip"
+WINTUN_ZIP_URL = "https://www.wintun.net/builds/wintun-0.14.1.zip"
+
+COUNTRY_CHECK_ENDPOINTS = [
+    ("ipwho.is", "https://ipwho.is/"),
+    ("ipapi.co", "https://ipapi.co/json/"),
+    ("api.ip.sb", "https://api.ip.sb/geoip"),
+    ("ipinfo.io", "https://ipinfo.io/json"),
+]
+
+
+def fmt_bytes(b: float) -> str:
+    if b < 1024:
+        return f"{b:.0f} B"
+    if b < 1024 * 1024:
+        return f"{b / 1024:.1f} KB"
+    if b < 1024 * 1024 * 1024:
+        return f"{b / (1024 * 1024):.2f} MB"
+    return f"{b / (1024 * 1024 * 1024):.2f} GB"
+
+
+def fmt_rate(bps: float) -> str:
+    if bps < 1024:
+        return f"{bps:.0f} B/s"
+    if bps < 1024 * 1024:
+        return f"{bps / 1024:.1f} KB/s"
+    return f"{bps / (1024 * 1024):.2f} MB/s"
+
+
+def is_windows_admin() -> bool:
+    try:
+        return bool(ctypes.windll.shell32.IsUserAnAdmin())
+    except Exception:
+        return False
 
 # Free Gmail Google Apps Script limits: 30 concurrent, 20,000 UrlFetch/day
 GAS_QUOTA_PRESETS = {
@@ -409,35 +454,91 @@ def post_to_gas(url: str, payload: dict, timeout: float = 30.0) -> tuple[dict, b
         return {"ok": False, "error": f"Invalid JSON from GAS: {raw[:120]}"}, False
 
 
+class KeepAlivePool:
+    """Thread-safe persistent HTTP/HTTPS connection pool to avoid repeated TLS handshakes."""
+
+    def __init__(self):
+        self._lock = threading.Lock()
+        self._conns: dict[tuple[str, str, int], list[http.client.HTTPConnection]] = {}
+        self._ssl_ctx = ssl.create_default_context()
+
+    def _acquire(self, scheme: str, host: str, port: int, timeout: float):
+        key = (scheme, host, port)
+        with self._lock:
+            bucket = self._conns.get(key)
+            if bucket:
+                conn = bucket.pop()
+                conn.timeout = timeout
+                return conn
+        if scheme == "https":
+            return http.client.HTTPSConnection(host, port, timeout=timeout, context=self._ssl_ctx)
+        return http.client.HTTPConnection(host, port, timeout=timeout)
+
+    def _release(self, scheme: str, host: str, port: int, conn):
+        key = (scheme, host, port)
+        with self._lock:
+            bucket = self._conns.setdefault(key, [])
+            if len(bucket) < 24:
+                bucket.append(conn)
+                return
+        try:
+            conn.close()
+        except Exception:
+            pass
+
+    def post_json(self, url: str, body_bytes: bytes, headers: dict, timeout: float = 30.0) -> tuple[int, str]:
+        parsed = urllib.parse.urlsplit(url)
+        scheme = parsed.scheme.lower()
+        host = parsed.hostname
+        port = parsed.port or (443 if scheme == "https" else 80)
+        path = parsed.path or "/"
+        if parsed.query:
+            path = f"{path}?{parsed.query}"
+
+        for attempt in range(2):
+            conn = self._acquire(scheme, host, port, timeout)
+            try:
+                conn.request("POST", path, body=body_bytes, headers={**headers, "Connection": "keep-alive"})
+                resp = conn.getresponse()
+                raw = resp.read().decode("utf-8", errors="replace")
+                status = resp.status
+                self._release(scheme, host, port, conn)
+                return status, raw
+            except (http.client.HTTPException, OSError, BrokenPipeError):
+                try:
+                    conn.close()
+                except Exception:
+                    pass
+                if attempt == 0:
+                    continue
+                raise
+
+
+_KA_POOL = KeepAlivePool()
+
+
 def post_direct_to_server(server_url: str, payload: dict, auth_key: str, timeout: float = 30.0) -> dict:
     tunnel_url = normalize_tunnel_url(server_url)
     data = json.dumps(payload).encode("utf-8")
-    req = urllib.request.Request(
-        tunnel_url,
-        data=data,
-        headers={
-            "Content-Type": "application/json",
-            "X-Auth-Key": auth_key,
-            "User-Agent": "FreeDnet-Client/1.0",
-        },
-        method="POST",
-    )
+    headers = {
+        "Content-Type": "application/json",
+        "X-Auth-Key": auth_key,
+        "User-Agent": "FreeDnet-Client/2.0",
+    }
     try:
-        with _DIRECT_OPENER.open(req, timeout=timeout) as resp:
-            raw = resp.read().decode("utf-8", errors="replace")
-        return json.loads(raw)
-    except urllib.error.HTTPError as e:
-        raw = e.read().decode("utf-8", errors="replace") if e.fp else str(e)
+        code, raw = _KA_POOL.post_json(tunnel_url, data, headers, timeout=timeout)
+        if 200 <= code < 300:
+            return json.loads(raw)
         try:
             parsed = json.loads(raw)
-            if e.code >= 500:
+            if code >= 500:
                 parsed["upstreamError"] = True
             return parsed
         except Exception:
             return {
                 "ok": False,
-                "upstreamError": e.code >= 500 or e.code == 429,
-                "error": f"HTTP {e.code}",
+                "upstreamError": code >= 500 or code == 429,
+                "error": f"HTTP {code}",
                 "detail": raw[:180],
             }
     except Exception as e:
@@ -471,7 +572,7 @@ class FreeDnetProxyServer:
         self.tx_bytes = 0
         self.rx_bytes = 0
         self._stat_lock = threading.Lock()
-        self._tunnel_sem = threading.Semaphore(64)
+        self._tunnel_sem = threading.Semaphore(96)
 
     def start(self):
         self.server_sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
@@ -806,11 +907,11 @@ class FreeDnetProxyServer:
                 with self._stat_lock:
                     self.tx_bytes += len(outgoing)
                 b64_in = base64.b64encode(outgoing).decode("ascii")
-                wait_ms = 600
+                wait_ms = 800
             elif prev_had_rx:
                 idle_cycles = 0
                 b64_in = ""
-                wait_ms = 0
+                wait_ms = 250
             else:
                 if time.time() - last_data_ts > 90:
                     return
@@ -1135,8 +1236,15 @@ class FreeDnetProWindow(QMainWindow):
         )
 
         self.proxy = None
+        self.xray_proc = None
+        self.tun_active = False
         self.log_queue: queue.Queue[str] = queue.Queue()
         self._last_save_ts = time.time()
+        self._last_stat_ts = time.time()
+        self._prev_tx = 0
+        self._prev_rx = 0
+        self._peak_tx_rate = 0.0
+        self._peak_rx_rate = 0.0
 
         self._build_ui()
         self._refresh_target_dropdown()
@@ -1175,6 +1283,7 @@ class FreeDnetProWindow(QMainWindow):
 
     def closeEvent(self, event):
         try:
+            self._stop_tun_process()
             self._save_config()
             if self.proxy and self.proxy.running:
                 self.proxy.stop()
@@ -1210,17 +1319,23 @@ class FreeDnetProWindow(QMainWindow):
 
         self.status_pill = QLabel("● STOPPED", objectName="StatusPillStopped")
         self.ping_btn = QPushButton("Ping All")
-        self.e2e_btn = QPushButton("Test Proxy (E2E)")
+        self.e2e_btn = QPushButton("Test E2E")
+        self.country_btn = QPushButton("Country Check")
+        self.tun_btn = QPushButton("TUN Mode: OFF")
         self.start_btn = QPushButton("▶  Start Proxy", objectName="PrimaryBtn")
 
         self.ping_btn.clicked.connect(self.test_all_accounts)
         self.e2e_btn.clicked.connect(self.test_proxy_e2e)
+        self.country_btn.clicked.connect(self.check_country_ip)
+        self.tun_btn.clicked.connect(self.toggle_tun_mode)
         self.start_btn.clicked.connect(self.toggle_proxy)
 
         h_lay.addWidget(self.status_pill)
-        h_lay.addSpacing(12)
+        h_lay.addSpacing(10)
         h_lay.addWidget(self.ping_btn)
         h_lay.addWidget(self.e2e_btn)
+        h_lay.addWidget(self.country_btn)
+        h_lay.addWidget(self.tun_btn)
         h_lay.addWidget(self.start_btn)
         outer.addWidget(header)
 
@@ -1230,13 +1345,14 @@ class FreeDnetProWindow(QMainWindow):
         body.setSpacing(12)
         outer.addLayout(body)
 
-        # 4 KPI Cards Row
+        # 5 KPI Cards Row (Usage, Live Speed, Peak Speed, Total Traffic, Pool)
         kpi_row = QHBoxLayout()
-        kpi_row.setSpacing(12)
+        kpi_row.setSpacing(10)
         self.kpi_tunnels = self._make_kpi_card(kpi_row, "ACTIVE TUNNELS", "0")
-        self.kpi_traffic = self._make_kpi_card(kpi_row, "TOTAL TRAFFIC", "0.0 KB / 0.0 KB")
-        self.kpi_gas = self._make_kpi_card(kpi_row, "GAS POOL", "0 active")
-        self.kpi_srv = self._make_kpi_card(kpi_row, "BACKEND SERVERS", "0 ready")
+        self.kpi_speed = self._make_kpi_card(kpi_row, "LIVE SPEED (↓ / ↑)", "0 B/s  |  0 B/s")
+        self.kpi_peak = self._make_kpi_card(kpi_row, "PEAK SPEED (↓ / ↑)", "0 B/s  |  0 B/s")
+        self.kpi_traffic = self._make_kpi_card(kpi_row, "TOTAL USAGE (↓ / ↑)", "0 B  |  0 B")
+        self.kpi_pool = self._make_kpi_card(kpi_row, "POOL HEALTH", "GAS 0 | SRV 0")
         body.addLayout(kpi_row)
 
         # Routing & Connection Card
@@ -1767,6 +1883,251 @@ class FreeDnetProWindow(QMainWindow):
             QMessageBox.critical(self, "Start Failed", str(e))
             self.proxy = None
 
+    def _socks5_https_get(self, proxy_host: str, proxy_port: int, url: str, timeout: float = 15.0) -> str:
+        parsed = urllib.parse.urlsplit(url)
+        host = parsed.hostname
+        port = parsed.port or 443
+        path = parsed.path or "/"
+        if parsed.query:
+            path = f"{path}?{parsed.query}"
+
+        s = socket.create_connection((proxy_host, proxy_port), timeout=timeout)
+        s.sendall(b"\x05\x01\x00")
+        if s.recv(2) != b"\x05\x00":
+            s.close()
+            raise RuntimeError("SOCKS5 auth failed")
+        h_bytes = host.encode("utf-8")
+        s.sendall(b"\x05\x01\x00\x03" + bytes([len(h_bytes)]) + h_bytes + port.to_bytes(2, "big"))
+        rep = s.recv(10)
+        if len(rep) < 2 or rep[1] != 0x00:
+            s.close()
+            raise RuntimeError(f"SOCKS5 connect failed ({rep[1] if len(rep) > 1 else '?'})")
+
+        ctx = ssl.create_default_context()
+        tls_sock = ctx.wrap_socket(s, server_hostname=host)
+        req = f"GET {path} HTTP/1.0\r\nHost: {host}\r\nUser-Agent: curl/8.0\r\nAccept: application/json\r\nConnection: close\r\n\r\n"
+        tls_sock.sendall(req.encode("ascii"))
+        chunks = []
+        while True:
+            data = tls_sock.recv(8192)
+            if not data:
+                break
+            chunks.append(data)
+        tls_sock.close()
+        raw = b"".join(chunks).decode("utf-8", errors="replace")
+        body = raw.split("\r\n\r\n", 1)[1] if "\r\n\r\n" in raw else raw
+        return body.strip()
+
+    def check_country_ip(self):
+        via_proxy = bool(self.proxy and self.proxy.running)
+        host = self.config["listen_host"]
+        port = self.config["listen_port"]
+
+        def worker():
+            self.log(f"Checking IP/Country ({'via FreeDnet proxy' if via_proxy else 'direct system connection'})...")
+            for name, url in COUNTRY_CHECK_ENDPOINTS:
+                try:
+                    if via_proxy:
+                        raw = self._socks5_https_get(host, port, url, timeout=18.0)
+                    else:
+                        req = urllib.request.Request(url, headers={"User-Agent": "curl/8.0", "Accept": "application/json"})
+                        with _DIRECT_OPENER.open(req, timeout=12.0) as resp:
+                            raw = resp.read().decode("utf-8", errors="replace")
+                    data = json.loads(raw)
+                    ip = data.get("ip") or data.get("query") or "?"
+                    country = data.get("country_name") or data.get("country") or "?"
+                    code = data.get("country_code") or ""
+                    city = data.get("city") or ""
+                    isp = (
+                        (data.get("connection") or {}).get("isp")
+                        if isinstance(data.get("connection"), dict)
+                        else (data.get("org") or data.get("organization") or "")
+                    )
+                    loc = f"{country} ({code})" if code else str(country)
+                    if city:
+                        loc = f"{loc} - {city}"
+                    self.log(f"Country Check OK [{name}]: IP={ip} | {loc} | {isp}")
+                    return
+                except Exception as e:
+                    self.log(f"Country Check [{name}] failed ({e}), trying next...")
+            self.log("Country Check FAILED: All IP lookup services timed out.")
+
+        threading.Thread(target=worker, daemon=True).start()
+
+    def _download_with_fallback(self, url: str, timeout: float = 35.0) -> bytes:
+        req = urllib.request.Request(url, headers={"User-Agent": "FreeDnet-Client/2.0"})
+        try:
+            with _DIRECT_OPENER.open(req, timeout=timeout) as resp:
+                return resp.read()
+        except Exception:
+            if self.proxy and self.proxy.running:
+                proxy_url = f"http://{self.config['listen_host']}:{self.config['listen_port']}"
+                opener = urllib.request.build_opener(urllib.request.ProxyHandler({"http": proxy_url, "https": proxy_url}))
+                with opener.open(req, timeout=60.0) as resp:
+                    return resp.read()
+            raise
+
+    def _ensure_xray_tun_assets(self) -> bool:
+        os.makedirs(XRAY_DIR, exist_ok=True)
+        if not os.path.exists(XRAY_EXE):
+            self.log("Downloading Xray-core Windows x64...")
+            zbytes = self._download_with_fallback(XRAY_ZIP_URL)
+            with zipfile.ZipFile(io.BytesIO(zbytes)) as zf:
+                for member in zf.namelist():
+                    base = os.path.basename(member)
+                    if base in ("xray.exe", "geoip.dat", "geosite.dat"):
+                        with open(os.path.join(XRAY_DIR, base), "wb") as out:
+                            out.write(zf.read(member))
+            self.log("Xray-core x64 extracted.")
+        if not os.path.exists(WINTUN_DLL):
+            self.log("Downloading Wintun driver (amd64)...")
+            wbytes = self._download_with_fallback(WINTUN_ZIP_URL)
+            with zipfile.ZipFile(io.BytesIO(wbytes)) as zf:
+                for member in zf.namelist():
+                    if member.endswith("bin/amd64/wintun.dll"):
+                        with open(WINTUN_DLL, "wb") as out:
+                            out.write(zf.read(member))
+                        break
+            self.log("Wintun.dll ready.")
+        return os.path.exists(XRAY_EXE) and os.path.exists(WINTUN_DLL)
+
+    def _write_tun_config(self):
+        host = self.config["listen_host"]
+        port = int(self.config["listen_port"])
+        bypass_domains = ["domain:script.google.com", "domain:onrender.com", "domain:snapdeploy.app", "domain:snapdeploy.dev"]
+        for srv in self.server_pool.servers:
+            try:
+                h = urllib.parse.urlsplit(srv.url).hostname
+                if h:
+                    bypass_domains.append(f"full:{h}")
+            except Exception:
+                pass
+
+        cfg = {
+            "log": {"loglevel": "warning"},
+            "inbounds": [
+                {
+                    "tag": "tun-in",
+                    "port": 0,
+                    "protocol": "tun",
+                    "settings": {
+                        "name": "FreeDnetTUN",
+                        "MTU": 1400,
+                        "autoSystemRoutingTable": True,
+                        "autoOutboundsInterface": "auto",
+                    },
+                    "sniffing": {"enabled": True, "destOverride": ["http", "tls", "quic"]},
+                }
+            ],
+            "outbounds": [
+                {
+                    "tag": "freednet-socks",
+                    "protocol": "socks",
+                    "settings": {"servers": [{"address": host, "port": port}]},
+                },
+                {"tag": "direct", "protocol": "freedom", "settings": {}},
+                {"tag": "block", "protocol": "blackhole", "settings": {}},
+            ],
+            "routing": {
+                "domainStrategy": "IPIfNonMatch",
+                "rules": [
+                    {"type": "field", "port": "53", "outboundTag": "direct"},
+                    {"type": "field", "ip": ["geoip:private", "127.0.0.1/8"], "outboundTag": "direct"},
+                    {"type": "field", "domain": list(dict.fromkeys(bypass_domains)), "outboundTag": "direct"},
+                    {"type": "field", "network": "tcp", "outboundTag": "freednet-socks"},
+                    {"type": "field", "network": "udp", "outboundTag": "block"},
+                ],
+            },
+        }
+        with open(XRAY_TUN_CFG, "w", encoding="utf-8") as f:
+            json.dump(cfg, f, indent=2)
+
+    def _stop_tun_process(self):
+        if self.xray_proc is not None:
+            try:
+                self.xray_proc.terminate()
+                self.xray_proc.wait(timeout=3)
+            except Exception:
+                try:
+                    self.xray_proc.kill()
+                except Exception:
+                    pass
+            self.xray_proc = None
+        if sys.platform == "win32" and self.tun_active:
+            try:
+                subprocess.run(["taskkill", "/F", "/IM", "xray.exe"], capture_output=True)
+            except Exception:
+                pass
+        self.tun_active = False
+
+    def toggle_tun_mode(self):
+        if self.tun_active:
+            self._stop_tun_process()
+            self.tun_btn.setText("TUN Mode: OFF")
+            self.tun_btn.setObjectName("")
+            self.tun_btn.style().unpolish(self.tun_btn)
+            self.tun_btn.style().polish(self.tun_btn)
+            self.log("Xray TUN Mode stopped (FreeDnetTUN adapter removed).")
+            return
+
+        if sys.platform != "win32":
+            QMessageBox.information(self, "Windows Only", "Wintun TUN Mode is designed for Windows 10/11 x64.")
+            return
+
+        if not (self.proxy and self.proxy.running):
+            QMessageBox.warning(self, "Start Proxy First", "Please click 'Start Proxy' before enabling TUN Mode.")
+            return
+
+        if not is_windows_admin():
+            res = QMessageBox.question(
+                self,
+                "Administrator Required",
+                "Creating the FreeDnetTUN virtual network adapter requires Administrator privileges.\nRestart FreeDnet as Administrator now?",
+            )
+            if res == QMessageBox.Yes:
+                ctypes.windll.shell32.ShellExecuteW(None, "runas", sys.executable, f'"{os.path.abspath(__file__)}"', BASE_DIR, 1)
+                self.close()
+            return
+
+        self.tun_btn.setEnabled(False)
+        self.tun_btn.setText("Starting TUN...")
+
+        def worker():
+            try:
+                ok = self._ensure_xray_tun_assets()
+                if not ok:
+                    raise RuntimeError("Failed to prepare xray.exe or wintun.dll")
+                self._write_tun_config()
+                flags = getattr(subprocess, "CREATE_NO_WINDOW", 0)
+                self.xray_proc = subprocess.Popen(
+                    [XRAY_EXE, "run", "-c", XRAY_TUN_CFG],
+                    cwd=XRAY_DIR,
+                    creationflags=flags,
+                )
+                time.sleep(1.2)
+                if self.xray_proc.poll() is not None:
+                    raise RuntimeError("xray.exe exited unexpectedly (check Admin rights / Wintun)")
+                self.tun_active = True
+                self.log("Xray TUN Mode ACTIVE -> Virtual adapter 'FreeDnetTUN' created (visible in Control Panel & Task Manager).")
+            except Exception as e:
+                self.tun_active = False
+                self.log(f"TUN Mode FAILED -> {e}")
+            finally:
+                QTimer.singleShot(0, self._update_tun_btn_ui)
+
+        threading.Thread(target=worker, daemon=True).start()
+
+    def _update_tun_btn_ui(self):
+        self.tun_btn.setEnabled(True)
+        if self.tun_active:
+            self.tun_btn.setText("TUN Mode: ON")
+            self.tun_btn.setObjectName("PrimaryBtn")
+        else:
+            self.tun_btn.setText("TUN Mode: OFF")
+            self.tun_btn.setObjectName("")
+        self.tun_btn.style().unpolish(self.tun_btn)
+        self.tun_btn.style().polish(self.tun_btn)
+
     def _sync_tables(self):
         total_reqs = sum(a.total_requests for a in self.pool.accounts)
         self.gas_table.setRowCount(len(self.pool.accounts))
@@ -1804,8 +2165,7 @@ class FreeDnetProWindow(QMainWindow):
 
         enabled_gas = sum(1 for a in self.pool.accounts if a.enabled)
         enabled_srv = sum(1 for s in self.server_pool.servers if s.enabled)
-        self.kpi_gas.setText(f"{enabled_gas} / {len(self.pool.accounts)} enabled")
-        self.kpi_srv.setText(f"{enabled_srv} / {len(self.server_pool.servers)} enabled")
+        self.kpi_pool.setText(f"GAS {enabled_gas}/{len(self.pool.accounts)}  |  SRV {enabled_srv}/{len(self.server_pool.servers)}")
 
     def _on_ui_tick(self):
         lines = []
@@ -1825,17 +2185,31 @@ class FreeDnetProWindow(QMainWindow):
                 cursor.removeSelectedText()
 
         self._sync_tables()
+        now = time.time()
+        dt = max(0.1, now - self._last_stat_ts)
+        self._last_stat_ts = now
         if self.proxy and self.proxy.running:
+            tx = self.proxy.tx_bytes
+            rx = self.proxy.rx_bytes
+            tx_rate = max(0.0, (tx - self._prev_tx) / dt)
+            rx_rate = max(0.0, (rx - self._prev_rx) / dt)
+            self._prev_tx, self._prev_rx = tx, rx
+            self._peak_tx_rate = max(self._peak_tx_rate, tx_rate)
+            self._peak_rx_rate = max(self._peak_rx_rate, rx_rate)
+
             self.kpi_tunnels.setText(str(self.proxy.active_tunnels))
-            self.kpi_traffic.setText(f"{self.proxy.tx_bytes / 1024:.1f} / {self.proxy.rx_bytes / 1024:.1f} KB")
-            if time.time() - self._last_save_ts > 30:
-                self._last_save_ts = time.time()
+            self.kpi_speed.setText(f"{fmt_rate(rx_rate)} ↓  |  {fmt_rate(tx_rate)} ↑")
+            self.kpi_peak.setText(f"{fmt_rate(self._peak_rx_rate)} ↓  |  {fmt_rate(self._peak_tx_rate)} ↑")
+            self.kpi_traffic.setText(f"{fmt_bytes(rx)} ↓  |  {fmt_bytes(tx)} ↑")
+            if now - self._last_save_ts > 30:
+                self._last_save_ts = now
                 try:
                     self._save_config()
                 except Exception:
                     pass
         else:
             self.kpi_tunnels.setText("0")
+            self.kpi_speed.setText("0 B/s  |  0 B/s")
 
 
 def main():
