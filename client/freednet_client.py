@@ -12,11 +12,13 @@ import base64
 from collections import deque
 import ctypes
 import datetime
+import gzip
 import http.client
 import io
 import json
 import os
 import queue
+import select
 import socket
 import ssl
 import struct
@@ -28,6 +30,7 @@ import urllib.error
 import urllib.parse
 import urllib.request
 import zipfile
+import zlib
 
 
 
@@ -463,20 +466,12 @@ _DIRECT_OPENER = urllib.request.build_opener(urllib.request.ProxyHandler({}))
 
 def post_to_gas(url: str, payload: dict, timeout: float = 30.0) -> tuple[dict, bool]:
     data = json.dumps(payload).encode("utf-8")
-    req = urllib.request.Request(
-        url,
-        data=data,
-        headers={"Content-Type": "application/json"},
-        method="POST",
-    )
     try:
-        with _OPENER.open(req, timeout=timeout) as resp:
-            raw = resp.read().decode("utf-8", errors="replace")
-    except urllib.error.HTTPError as e:
-        raw = e.read().decode("utf-8", errors="replace") if e.fp else str(e)
-        if e.code == 429 or "too many" in raw.lower():
-            return {"ok": False, "error": f"HTTP {e.code} rate limit"}, True
-        return {"ok": False, "error": f"HTTP {e.code}: {raw[:160]}"}, False
+        code, raw = _KA_POOL.post_gas_keepalive(url, data, timeout=timeout)
+        if code == 429 or "too many" in raw.lower():
+            return {"ok": False, "error": f"HTTP {code} rate limit"}, True
+        if code < 200 or code >= 300:
+            return {"ok": False, "error": f"HTTP {code}: {raw[:160]}"}, False
     except Exception as e:
         return {"ok": False, "error": str(e)}, False
 
@@ -527,7 +522,7 @@ class KeepAlivePool:
         key = (scheme, host, port)
         with self._lock:
             bucket = self._conns.setdefault(key, [])
-            if len(bucket) < 24:
+            if len(bucket) < 48:
                 bucket.append(conn)
                 return
         try:
@@ -535,7 +530,7 @@ class KeepAlivePool:
         except Exception:
             pass
 
-    def post_json(self, url: str, body_bytes: bytes, headers: dict, timeout: float = 30.0) -> tuple[int, str]:
+    def _request_once(self, method: str, url: str, body_bytes: bytes | None, headers: dict, timeout: float) -> tuple[int, str, str]:
         parsed = urllib.parse.urlsplit(url)
         scheme = parsed.scheme.lower()
         host = parsed.hostname
@@ -547,12 +542,26 @@ class KeepAlivePool:
         for attempt in range(2):
             conn = self._acquire(scheme, host, port, timeout)
             try:
-                conn.request("POST", path, body=body_bytes, headers={**headers, "Connection": "keep-alive"})
+                req_headers = {**headers, "Connection": "keep-alive"}
+                if body_bytes is not None and method == "POST":
+                    conn.request("POST", path, body=body_bytes, headers=req_headers)
+                else:
+                    req_headers.pop("Content-Type", None)
+                    conn.request(method, path, headers=req_headers)
                 resp = conn.getresponse()
                 raw = resp.read().decode("utf-8", errors="replace")
                 status = resp.status
-                self._release(scheme, host, port, conn)
-                return status, raw
+                location = resp.getheader("Location") or ""
+                if location and location.startswith("/"):
+                    location = f"{scheme}://{host}:{port}{location}" if parsed.port else f"{scheme}://{host}{location}"
+                if (resp.getheader("Connection") or "").lower() == "close":
+                    try:
+                        conn.close()
+                    except Exception:
+                        pass
+                else:
+                    self._release(scheme, host, port, conn)
+                return status, raw, location
             except (http.client.HTTPException, OSError, BrokenPipeError):
                 try:
                     conn.close()
@@ -561,6 +570,19 @@ class KeepAlivePool:
                 if attempt == 0:
                     continue
                 raise
+
+    def post_json(self, url: str, body_bytes: bytes, headers: dict, timeout: float = 30.0) -> tuple[int, str]:
+        status, raw, _ = self._request_once("POST", url, body_bytes, headers, timeout)
+        return status, raw
+
+    def post_gas_keepalive(self, url: str, body_bytes: bytes, timeout: float = 30.0) -> tuple[int, str]:
+        headers = {"Content-Type": "application/json", "User-Agent": "FreeDnet-Client/2.0"}
+        status, raw, loc = self._request_once("POST", url, body_bytes, headers, timeout)
+        hops = 0
+        while status in (301, 302, 303, 307, 308) and loc and hops < 4:
+            hops += 1
+            status, raw, loc = self._request_once("GET", loc, None, {"User-Agent": "FreeDnet-Client/2.0"}, timeout)
+        return status, raw
 
 
 _KA_POOL = KeepAlivePool()
@@ -932,68 +954,122 @@ class FreeDnetProxyServer:
             data += chunk
         return data
 
+    def _encode_payload(self, raw: bytes) -> dict:
+        looks_like_tls = len(raw) >= 2 and 0x14 <= raw[0] <= 0x17 and raw[1] == 0x03
+        if not looks_like_tls and 512 < len(raw) <= 524288:
+            gz = gzip.compress(raw, compresslevel=1)
+            if len(gz) < len(raw):
+                return {"dataZ": base64.b64encode(gz).decode("ascii")}
+        return {"data": base64.b64encode(raw).decode("ascii")}
+
+    def _decode_payload(self, res: dict) -> bytes:
+        if res.get("dataZ"):
+            return gzip.decompress(base64.b64decode(res["dataZ"]))
+        if res.get("data"):
+            return base64.b64decode(res["data"])
+        return b""
+
     def _relay_loop(self, client_sock: socket.socket, session_id: str, pinned_backend: BackendServer | None):
+        closed_evt = threading.Event()
+        last_activity = [time.time()]
+
+        def tx_worker():
+            try:
+                client_sock.settimeout(15.0)
+                while self.running and not closed_evt.is_set():
+                    rlist, _, _ = select.select([client_sock], [], [], 0.1)
+                    if not rlist:
+                        continue
+                    outgoing = b""
+                    try:
+                        chunk = client_sock.recv(65536)
+                        if not chunk:
+                            closed_evt.set()
+                            return
+                        outgoing = chunk
+                        while len(outgoing) < 262144:
+                            r2, _, _ = select.select([client_sock], [], [], 0.005)
+                            if not r2:
+                                break
+                            more = client_sock.recv(65536)
+                            if not more:
+                                break
+                            outgoing += more
+                    except OSError:
+                        closed_evt.set()
+                        return
+
+                    if not outgoing:
+                        continue
+
+                    last_activity[0] = time.time()
+                    with self._stat_lock:
+                        self.tx_bytes += len(outgoing)
+                    body = {"sessionId": session_id, "waitMs": 0, "txOnly": True, **self._encode_payload(outgoing)}
+                    res = self._send_request("sync", body, backend=pinned_backend, retries=1)
+                    if not res.get("ok"):
+                        closed_evt.set()
+                        return
+                    extra_rx = self._decode_payload(res)
+                    if extra_rx:
+                        last_activity[0] = time.time()
+                        try:
+                            client_sock.sendall(extra_rx)
+                            with self._stat_lock:
+                                self.rx_bytes += len(extra_rx)
+                        except OSError:
+                            closed_evt.set()
+                            return
+                    if res.get("closed"):
+                        closed_evt.set()
+                        return
+            except Exception:
+                closed_evt.set()
+
+        tx_thread = threading.Thread(target=tx_worker, daemon=True)
+        tx_thread.start()
+
         prev_had_rx = False
         idle_cycles = 0
-        last_data_ts = time.time()
-        while self.running:
-            client_sock.settimeout(0.008 if prev_had_rx else 0.05)
-            outgoing = b""
-            try:
-                while len(outgoing) < 131072:
-                    chunk = client_sock.recv(32768)
-                    if not chunk:
-                        return
-                    outgoing += chunk
-            except socket.timeout:
-                pass
-            except OSError:
-                return
-
-            if outgoing:
-                idle_cycles = 0
-                last_data_ts = time.time()
-                with self._stat_lock:
-                    self.tx_bytes += len(outgoing)
-                b64_in = base64.b64encode(outgoing).decode("ascii")
-                wait_ms = 800
-            elif prev_had_rx:
-                idle_cycles = 0
-                b64_in = ""
-                wait_ms = 250
-            else:
-                if time.time() - last_data_ts > 90:
-                    return
-                idle_cycles += 1
-                b64_in = ""
-                if self.active_tunnels > 6:
-                    wait_ms = 1200
+        try:
+            while self.running and not closed_evt.is_set():
+                if prev_had_rx:
+                    wait_ms = 120
                 else:
-                    wait_ms = 2000 if idle_cycles == 1 else (4000 if idle_cycles == 2 else 6000)
+                    if time.time() - last_activity[0] > 90:
+                        return
+                    idle_cycles += 1
+                    if self.active_tunnels > 6:
+                        wait_ms = 1200
+                    else:
+                        wait_ms = 1800 if idle_cycles == 1 else (3500 if idle_cycles == 2 else 6000)
 
-            res = self._send_request(
-                "sync",
-                {"sessionId": session_id, "data": b64_in, "waitMs": wait_ms},
-                backend=pinned_backend,
-                retries=1,
-            )
-            if not res.get("ok"):
-                return
-
-            raw_out = base64.b64decode(res["data"]) if res.get("data") else b""
-            prev_had_rx = len(raw_out) > 0
-            if raw_out:
-                idle_cycles = 0
-                last_data_ts = time.time()
-                try:
-                    client_sock.sendall(raw_out)
-                    with self._stat_lock:
-                        self.rx_bytes += len(raw_out)
-                except OSError:
+                res = self._send_request(
+                    "sync",
+                    {"sessionId": session_id, "waitMs": wait_ms, "acceptGzip": True},
+                    backend=pinned_backend,
+                    retries=1,
+                )
+                if not res.get("ok"):
                     return
 
-            if res.get("closed"):
-                return
+                raw_out = self._decode_payload(res)
+                prev_had_rx = len(raw_out) > 0
+                if raw_out:
+                    idle_cycles = 0
+                    last_activity[0] = time.time()
+                    try:
+                        client_sock.sendall(raw_out)
+                        with self._stat_lock:
+                            self.rx_bytes += len(raw_out)
+                    except OSError:
+                        return
+
+                if res.get("closed"):
+                    return
+        finally:
+            closed_evt.set()
+            tx_thread.join(timeout=0.5)
 
 from PySide6.QtCore import Qt, QTimer
 from PySide6.QtGui import QAction, QColor, QIcon
@@ -1704,7 +1780,7 @@ class FreeDnetProWindow(QMainWindow):
         self.tabs.addTab(diag_tab, "IP & Diagnostics")
 
         # ==========================================================
-        # TAB 5: SETTINGS & FULL LOGS
+        # TAB 4: SETTINGS & FULL LOGS
         # ==========================================================
         set_tab = QWidget()
         set_lay = QVBoxLayout(set_tab)
@@ -2254,7 +2330,7 @@ class FreeDnetProWindow(QMainWindow):
             self.proxy.start()
             lbl = "DIRECT" if mode == "direct" else "GAS"
             self.status_pill.setObjectName("StatusPillRunning")
-            self.status_pill.setText(f"● {lbl} ({self.config['listen_host']}:{self.config['listen_port']})")
+            self.status_pill.setText(f"● RUNNING · {lbl}")
             self.status_pill.style().unpolish(self.status_pill)
             self.status_pill.style().polish(self.status_pill)
             self.start_btn.setObjectName("DangerBtn")
@@ -2428,6 +2504,16 @@ class FreeDnetProWindow(QMainWindow):
                     {"type": "field", "port": "53", "outboundTag": "direct"},
                     {"type": "field", "ip": ["geoip:private", "127.0.0.1/8"], "outboundTag": "direct"},
                     {"type": "field", "domain": list(dict.fromkeys(bypass_domains)), "outboundTag": "direct"},
+                    *(
+                        [{"type": "field", "ip": ["geoip:ir"], "outboundTag": "direct"}]
+                        if os.path.exists(os.path.join(XRAY_DIR, "geoip.dat"))
+                        else []
+                    ),
+                    *(
+                        [{"type": "field", "domain": ["geosite:category-ir", "regexp:.*\\.ir$"], "outboundTag": "direct"}]
+                        if os.path.exists(os.path.join(XRAY_DIR, "geosite.dat"))
+                        else []
+                    ),
                     {"type": "field", "network": "tcp", "outboundTag": "freednet-socks"},
                     {"type": "field", "network": "udp", "outboundTag": "block"},
                 ],
