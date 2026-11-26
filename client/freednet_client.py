@@ -31,7 +31,7 @@ import zipfile
 
 
 
-BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+BASE_DIR = os.path.dirname(sys.executable) if getattr(sys, "frozen", False) else os.path.dirname(os.path.abspath(__file__))
 CONFIG_PATH = os.path.join(BASE_DIR, "config.json")
 XRAY_DIR = os.path.join(BASE_DIR, "xray")
 XRAY_EXE = os.path.join(XRAY_DIR, "xray.exe")
@@ -2085,7 +2085,8 @@ class FreeDnetProWindow(QMainWindow):
                 "Creating the FreeDnetTUN virtual network adapter requires Administrator privileges.\nRestart FreeDnet as Administrator now?",
             )
             if res == QMessageBox.Yes:
-                ctypes.windll.shell32.ShellExecuteW(None, "runas", sys.executable, f'"{os.path.abspath(__file__)}"', BASE_DIR, 1)
+                launch_arg = "" if getattr(sys, "frozen", False) else f'"{os.path.abspath(__file__)}"'
+                ctypes.windll.shell32.ShellExecuteW(None, "runas", sys.executable, launch_arg, BASE_DIR, 1)
                 self.close()
             return
 
