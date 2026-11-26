@@ -1,21 +1,10 @@
 @echo off
 title FreeDnet Client
 cd /d "%~dp0"
-
-where python >nul 2>&1
-if %errorlevel%==0 (
-    python freednet_client.py
-    goto :end
+python -c "import PySide6" 2>nul
+if errorlevel 1 (
+    echo Installing PySide6...
+    pip install -r requirements.txt
 )
-
-where py >nul 2>&1
-if %errorlevel%==0 (
-    py -3 freednet_client.py
-    goto :end
-)
-
-echo Python 3 was not found in PATH.
-echo Please install Python 3.8+ from https://www.python.org/downloads/
-pause
-
-:end
+python freednet_client.py
+if errorlevel 1 pause
