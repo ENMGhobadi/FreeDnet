@@ -100,6 +100,27 @@ def is_windows_admin() -> bool:
     except Exception:
         return False
 
+
+def set_windows_system_proxy(enable: bool, host: str = "127.0.0.1", port: int = 1080) -> bool:
+    if sys.platform != "win32":
+        return False
+    try:
+        import winreg
+        key_path = r"Software\Microsoft\Windows\CurrentVersion\Internet Settings"
+        with winreg.OpenKey(winreg.HKEY_CURRENT_USER, key_path, 0, winreg.KEY_SET_VALUE) as key:
+            if enable:
+                winreg.SetValueEx(key, "ProxyServer", 0, winreg.REG_SZ, f"{host}:{port}")
+                winreg.SetValueEx(key, "ProxyOverride", 0, winreg.REG_SZ, "localhost;127.*;10.*;172.16.*;192.168.*;<local>")
+                winreg.SetValueEx(key, "ProxyEnable", 0, winreg.REG_DWORD, 1)
+            else:
+                winreg.SetValueEx(key, "ProxyEnable", 0, winreg.REG_DWORD, 0)
+        wininet = ctypes.windll.wininet
+        wininet.InternetSetOptionW(0, 39, 0, 0)  # INTERNET_OPTION_SETTINGS_CHANGED
+        wininet.InternetSetOptionW(0, 37, 0, 0)  # INTERNET_OPTION_REFRESH
+        return True
+    except Exception:
+        return False
+
 # Free Gmail Google Apps Script limits: 30 concurrent, 20,000 UrlFetch/day
 GAS_QUOTA_PRESETS = {
     "Low (Safe: 10 conc | 8k/day | 60 rpm)": (10, 8000, 60),
@@ -1305,6 +1326,7 @@ class FreeDnetProWindow(QMainWindow):
         self.proxy = None
         self.xray_proc = None
         self.tun_active = False
+        self.sys_proxy_active = False
         self.log_queue: queue.Queue[str] = queue.Queue()
         self._last_save_ts = time.time()
         self._last_stat_ts = time.time()
@@ -1389,6 +1411,9 @@ class FreeDnetProWindow(QMainWindow):
     def _quit_app(self):
         self._force_quit = True
         try:
+            if self.sys_proxy_active:
+                set_windows_system_proxy(False)
+                self.sys_proxy_active = False
             self._stop_tun_process()
             self._save_config()
             if self.proxy and self.proxy.running:
@@ -1413,6 +1438,9 @@ class FreeDnetProWindow(QMainWindow):
                 )
             return
         try:
+            if self.sys_proxy_active:
+                set_windows_system_proxy(False)
+                self.sys_proxy_active = False
             self._stop_tun_process()
             self._save_config()
             if self.proxy and self.proxy.running:
@@ -1456,9 +1484,11 @@ class FreeDnetProWindow(QMainWindow):
         h_lay.addStretch()
 
         self.status_pill = QLabel("● STOPPED", objectName="StatusPillStopped")
+        self.sys_proxy_btn = QPushButton("Sys Proxy: OFF")
         self.tun_btn = QPushButton("TUN Mode: OFF")
         self.start_btn = QPushButton("▶  Start Proxy", objectName="PrimaryBtn")
 
+        self.sys_proxy_btn.clicked.connect(self.toggle_system_proxy)
         self.tun_btn.clicked.connect(self.toggle_tun_mode)
         self.start_btn.clicked.connect(self.toggle_proxy)
 
@@ -1466,7 +1496,8 @@ class FreeDnetProWindow(QMainWindow):
         self.busy_label.setVisible(False)
         h_lay.addWidget(self.busy_label)
         h_lay.addWidget(self.status_pill)
-        h_lay.addSpacing(10)
+        h_lay.addSpacing(8)
+        h_lay.addWidget(self.sys_proxy_btn)
         h_lay.addWidget(self.tun_btn)
         h_lay.addWidget(self.start_btn)
         outer.addWidget(header)
@@ -1927,7 +1958,7 @@ class FreeDnetProWindow(QMainWindow):
         if self.proxy and self.proxy.running:
             self.proxy.route_mode = mode
             lbl = "DIRECT" if mode == "direct" else "GAS"
-            self.status_pill.setText(f"● RUNNING · {lbl}")
+            self.status_pill.setText(f"● {lbl} ({self.config['listen_host']}:{self.config['listen_port']})")
             self.log(f"Switched live chain mode to: {lbl}")
 
     # --- GAS Account CRUD ---
@@ -2175,6 +2206,13 @@ class FreeDnetProWindow(QMainWindow):
 
     def toggle_proxy(self):
         if self.proxy and self.proxy.running:
+            if self.sys_proxy_active:
+                set_windows_system_proxy(False)
+                self.sys_proxy_active = False
+                self.sys_proxy_btn.setText("Sys Proxy: OFF")
+                self.sys_proxy_btn.setObjectName("")
+                self.sys_proxy_btn.style().unpolish(self.sys_proxy_btn)
+                self.sys_proxy_btn.style().polish(self.sys_proxy_btn)
             self.proxy.stop()
             self.proxy = None
             self._save_config()
@@ -2213,7 +2251,7 @@ class FreeDnetProWindow(QMainWindow):
             self.proxy.start()
             lbl = "DIRECT" if mode == "direct" else "GAS"
             self.status_pill.setObjectName("StatusPillRunning")
-            self.status_pill.setText(f"● RUNNING · {lbl}")
+            self.status_pill.setText(f"● {lbl} ({self.config['listen_host']}:{self.config['listen_port']})")
             self.status_pill.style().unpolish(self.status_pill)
             self.status_pill.style().polish(self.status_pill)
             self.start_btn.setObjectName("DangerBtn")
@@ -2344,7 +2382,7 @@ class FreeDnetProWindow(QMainWindow):
     def _write_tun_config(self):
         host = self.config["listen_host"]
         port = int(self.config["listen_port"])
-        bypass_domains = ["domain:script.google.com", "domain:onrender.com", "domain:snapdeploy.app", "domain:snapdeploy.dev"]
+        bypass_domains = ["domain:script.google.com", "domain:googleusercontent.com", "domain:onrender.com", "domain:snapdeploy.app", "domain:snapdeploy.dev"]
         for srv in self.server_pool.servers:
             try:
                 h = urllib.parse.urlsplit(srv.url).hostname
@@ -2383,6 +2421,7 @@ class FreeDnetProWindow(QMainWindow):
             "routing": {
                 "domainStrategy": "IPIfNonMatch",
                 "rules": [
+                    {"type": "field", "process": ["FreeDnet.exe", "python.exe", "pythonw.exe"], "outboundTag": "direct"},
                     {"type": "field", "port": "53", "outboundTag": "direct"},
                     {"type": "field", "ip": ["geoip:private", "127.0.0.1/8"], "outboundTag": "direct"},
                     {"type": "field", "domain": list(dict.fromkeys(bypass_domains)), "outboundTag": "direct"},
@@ -2411,6 +2450,32 @@ class FreeDnetProWindow(QMainWindow):
             except Exception:
                 pass
         self.tun_active = False
+
+    def toggle_system_proxy(self):
+        if sys.platform != "win32":
+            QMessageBox.information(self, "Windows Only", "System Proxy toggle is for Windows.")
+            return
+        if self.sys_proxy_active:
+            set_windows_system_proxy(False)
+            self.sys_proxy_active = False
+            self.sys_proxy_btn.setText("Sys Proxy: OFF")
+            self.sys_proxy_btn.setObjectName("")
+            self.sys_proxy_btn.style().unpolish(self.sys_proxy_btn)
+            self.sys_proxy_btn.style().polish(self.sys_proxy_btn)
+            self.log("Windows System Proxy disabled.")
+            return
+        if not (self.proxy and self.proxy.running):
+            QMessageBox.warning(self, "Start Proxy First", "Please click 'Start Proxy' first.")
+            return
+        host = self.config["listen_host"]
+        port = int(self.config["listen_port"])
+        if set_windows_system_proxy(True, host, port):
+            self.sys_proxy_active = True
+            self.sys_proxy_btn.setText("Sys Proxy: ON")
+            self.sys_proxy_btn.setObjectName("PrimaryBtn")
+            self.sys_proxy_btn.style().unpolish(self.sys_proxy_btn)
+            self.sys_proxy_btn.style().polish(self.sys_proxy_btn)
+            self.log(f"Windows System Proxy set to {host}:{port}")
 
     def toggle_tun_mode(self):
         if self.tun_active:
