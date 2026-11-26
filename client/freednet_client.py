@@ -371,7 +371,8 @@ class NoPostRedirectHandler(urllib.request.HTTPRedirectHandler):
         return super().redirect_request(req, fp, code, msg, headers, newurl)
 
 
-_OPENER = urllib.request.build_opener(NoPostRedirectHandler())
+_OPENER = urllib.request.build_opener(urllib.request.ProxyHandler({}), NoPostRedirectHandler())
+_DIRECT_OPENER = urllib.request.build_opener(urllib.request.ProxyHandler({}))
 
 
 def post_to_gas(url: str, payload: dict, timeout: float = 30.0) -> tuple[dict, bool]:
@@ -430,7 +431,7 @@ def post_direct_to_server(server_url: str, payload: dict, auth_key: str, timeout
         method="POST",
     )
     try:
-        with urllib.request.urlopen(req, timeout=timeout) as resp:
+        with _DIRECT_OPENER.open(req, timeout=timeout) as resp:
             raw = resp.read().decode("utf-8", errors="replace")
         return json.loads(raw)
     except urllib.error.HTTPError as e:
@@ -478,6 +479,7 @@ class FreeDnetProxyServer:
         self.tx_bytes = 0
         self.rx_bytes = 0
         self._stat_lock = threading.Lock()
+        self._tunnel_sem = threading.Semaphore(64)
 
     def start(self):
         self.server_sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
@@ -620,6 +622,12 @@ class FreeDnetProxyServer:
             try:
                 client_sock, _ = self.server_sock.accept()
                 client_sock.settimeout(15.0)
+                if not self._tunnel_sem.acquire(blocking=False):
+                    try:
+                        client_sock.close()
+                    except Exception:
+                        pass
+                    continue
                 threading.Thread(target=self._handle_client, args=(client_sock,), daemon=True).start()
             except socket.timeout:
                 continue
@@ -698,6 +706,7 @@ class FreeDnetProxyServer:
                 pass
             with self._stat_lock:
                 self.active_tunnels = max(0, self.active_tunnels - 1)
+            self._tunnel_sem.release()
 
     def _handshake_socks5(self, sock: socket.socket):
         header = self._recv_exact(sock, 2)
@@ -916,9 +925,11 @@ if HAS_TK:
             self.result_data = (self.name_var.get().strip(), self.url_var.get().strip())
 
     class FreeDnetApp:
-        BG = "#f1f5f9"
+        BG = "#f4f6f9"
         CARD = "#ffffff"
-        BORDER = "#cbd5e1"
+        HEADER_BG = "#0f172a"
+        TOOLBAR_BG = "#f8fafc"
+        BORDER = "#e2e8f0"
         TEXT = "#0f172a"
         MUTED = "#64748b"
         ACCENT = "#2563eb"
@@ -926,14 +937,14 @@ if HAS_TK:
         GREEN = "#16a34a"
         RED = "#dc2626"
 
-        SRV_PRIORITY_LBL = "Auto: Priority (#1 -> #2 Failover)"
-        SRV_FAIR_LBL = "Auto: Fair-Share (1/N Equal)"
+        SRV_PRIORITY_LBL = "Priority (#1 -> #2 Failover)"
+        SRV_FAIR_LBL = "Fair-Share (1/N Equal)"
 
         def __init__(self, root: tk.Tk):
             self.root = root
-            self.root.title("FreeDnet Client — Multi-GAS & Multi-Server Smart Router")
-            self.root.geometry("1040x770")
-            self.root.minsize(920, 660)
+            self.root.title("FreeDnet Client — Smart Proxy Router")
+            self.root.geometry("1060x760")
+            self.root.minsize(940, 650)
             self.root.configure(bg=self.BG)
 
             self.config = self._load_config()
@@ -974,14 +985,33 @@ if HAS_TK:
             style.configure("TFrame", background=self.BG)
             style.configure("TLabel", background=self.BG, foreground=self.TEXT, font=("Segoe UI", 9))
             style.configure("Card.TLabel", background=self.CARD, foreground=self.TEXT, font=("Segoe UI", 9))
+            style.configure("Field.TLabel", background=self.CARD, foreground="#334155", font=("Segoe UI", 9, "bold"))
+            style.configure("Toolbar.TLabel", background=self.TOOLBAR_BG, foreground="#334155", font=("Segoe UI", 9, "bold"))
             style.configure("Muted.TLabel", background=self.CARD, foreground=self.MUTED, font=("Segoe UI", 8))
             style.configure("Section.TLabel", background=self.CARD, foreground=self.TEXT, font=("Segoe UI", 10, "bold"))
             style.configure("TCheckbutton", background=self.CARD, foreground=self.TEXT, font=("Segoe UI", 9))
+            style.configure("Toolbar.TCheckbutton", background=self.TOOLBAR_BG, foreground=self.TEXT, font=("Segoe UI", 9, "bold"))
             style.configure("TRadiobutton", background=self.CARD, foreground=self.TEXT, font=("Segoe UI", 9))
             style.configure("TNotebook", background=self.CARD, borderwidth=0)
-            style.configure("TNotebook.Tab", font=("Segoe UI", 9, "bold"), padding=[12, 6])
-            style.configure("Treeview", font=("Segoe UI", 9), rowheight=26, fieldbackground="#ffffff", background="#ffffff")
-            style.configure("Treeview.Heading", font=("Segoe UI", 9, "bold"), background="#e2e8f0", foreground=self.TEXT)
+            style.configure("TNotebook.Tab", font=("Segoe UI", 9, "bold"), padding=[14, 7], background="#e2e8f0", foreground="#334155")
+            style.map("TNotebook.Tab", background=[("selected", self.CARD)], foreground=[("selected", self.ACCENT)])
+            style.configure(
+                "Treeview",
+                font=("Segoe UI", 9),
+                rowheight=28,
+                fieldbackground="#ffffff",
+                background="#ffffff",
+                borderwidth=0,
+            )
+            style.configure(
+                "Treeview.Heading",
+                font=("Segoe UI", 9, "bold"),
+                background="#f1f5f9",
+                foreground="#334155",
+                relief="flat",
+                padding=[6, 5],
+            )
+            style.map("Treeview", background=[("selected", "#dbeafe")], foreground=[("selected", "#1e3a8a")])
 
         def _load_config(self) -> dict:
             if os.path.exists(CONFIG_PATH):
@@ -997,7 +1027,7 @@ if HAS_TK:
             self.config["auth_key"] = self.auth_var.get().strip()
             self.config["listen_host"] = self.host_var.get().strip() or "127.0.0.1"
             self.config["route_mode"] = self.route_var.get()
-            self.config["gas_mode"] = self.gas_mode_var.get()
+            self.config["gas_mode"] = "fair" if self.gas_fair_share_var.get() else "priority"
             self.config["server_mode"] = self.server_pool.server_mode
             self.config["quota_preset"] = self.preset_var.get()
             self.config["keep_awake"] = bool(self.keep_awake_var.get())
@@ -1019,16 +1049,22 @@ if HAS_TK:
                 pass
             self.root.destroy()
 
-        def _make_btn(self, parent, text, cmd, primary=False, danger=False, width=None):
-            bg = self.ACCENT if primary else (self.RED if danger else "#e2e8f0")
-            fg = "#ffffff" if (primary or danger) else self.TEXT
+        def _make_btn(self, parent, text, cmd, primary=False, danger=False, subtle=False, width=None):
+            if primary:
+                bg, abg, fg = self.ACCENT, self.ACCENT_HOVER, "#ffffff"
+            elif danger:
+                bg, abg, fg = self.RED, "#b91c1c", "#ffffff"
+            elif subtle:
+                bg, abg, fg = "#1e293b", "#334155", "#e2e8f0"
+            else:
+                bg, abg, fg = "#e2e8f0", "#cbd5e1", self.TEXT
             btn = tk.Button(
                 parent,
                 text=text,
                 command=cmd,
                 bg=bg,
                 fg=fg,
-                activebackground=self.ACCENT_HOVER if primary else "#cbd5e1",
+                activebackground=abg,
                 activeforeground=fg,
                 relief="flat",
                 bd=0,
@@ -1042,157 +1078,162 @@ if HAS_TK:
             return btn
 
         def _build_ui(self):
-            header = tk.Frame(self.root, bg="#0f172a", padx=16, pady=12)
+            # Top Header Bar
+            header = tk.Frame(self.root, bg=self.HEADER_BG, padx=18, pady=12)
             header.pack(fill="x")
 
-            title_box = tk.Frame(header, bg="#0f172a")
+            title_box = tk.Frame(header, bg=self.HEADER_BG)
             title_box.pack(side="left")
-            tk.Label(title_box, text="FreeDnet", font=("Segoe UI", 14, "bold"), fg="#ffffff", bg="#0f172a").pack(side="left")
+            tk.Label(title_box, text="FreeDnet", font=("Segoe UI", 15, "bold"), fg="#ffffff", bg=self.HEADER_BG).pack(side="left")
             tk.Label(
                 title_box,
-                text="  Multi-GAS & Multi-Server Smart Router",
+                text="  Smart Multi-GAS & Multi-Server Router",
                 font=("Segoe UI", 9),
                 fg="#94a3b8",
-                bg="#0f172a",
+                bg=self.HEADER_BG,
             ).pack(side="left", pady=(3, 0))
 
-            self.start_btn = self._make_btn(header, "Start Proxy", self.toggle_proxy, primary=True, width=14)
-            self.start_btn.pack(side="right", padx=(6, 0))
+            self.start_btn = self._make_btn(header, "Start Proxy", self.toggle_proxy, primary=True, width=13)
+            self.start_btn.pack(side="right", padx=(8, 0))
 
-            self.e2e_btn = self._make_btn(header, "Test Proxy (E2E)", self.test_proxy_e2e)
+            self.e2e_btn = self._make_btn(header, "Test Proxy (E2E)", self.test_proxy_e2e, subtle=True)
             self.e2e_btn.pack(side="right", padx=6)
 
-            self.test_btn = self._make_btn(header, "Ping All", self.test_all_accounts)
+            self.test_btn = self._make_btn(header, "Ping All", self.test_all_accounts, subtle=True)
             self.test_btn.pack(side="right", padx=6)
 
             self.status_var = tk.StringVar(value="● Stopped")
             self.status_lbl = tk.Label(
-                header, textvariable=self.status_var, font=("Segoe UI", 10, "bold"), fg="#f87171", bg="#0f172a"
+                header, textvariable=self.status_var, font=("Segoe UI", 10, "bold"), fg="#f87171", bg=self.HEADER_BG
             )
             self.status_lbl.pack(side="right", padx=14)
 
+            # Main Container
             main = ttk.Frame(self.root)
-            main.pack(fill="both", expand=True, padx=14, pady=12)
+            main.pack(fill="both", expand=True, padx=16, pady=14)
 
-            # Card 1: Settings, Routing & Quota Presets
-            cfg_card = tk.Frame(main, bg=self.CARD, highlightbackground=self.BORDER, highlightthickness=1, padx=12, pady=10)
-            cfg_card.pack(fill="x", pady=(0, 10))
+            # Card 1: Clean 2-Row Connection & Routing Bar
+            cfg_card = tk.Frame(main, bg=self.CARD, highlightbackground=self.BORDER, highlightthickness=1, padx=16, pady=12)
+            cfg_card.pack(fill="x", pady=(0, 12))
 
-            ttk.Label(cfg_card, text="Routing, Quota Profile & Connection Settings", style="Section.TLabel").grid(
-                row=0, column=0, columnspan=8, sticky="w", pady=(0, 8)
-            )
+            # Row 1: Chain Mode (left) & Backend Routing (right)
+            row1 = tk.Frame(cfg_card, bg=self.CARD)
+            row1.pack(fill="x", pady=(0, 10))
 
-            # Row 1: Chain Mode + Backend Mode
-            ttk.Label(cfg_card, text="Chain Mode:", style="Card.TLabel").grid(row=1, column=0, sticky="w", padx=(0, 6), pady=4)
+            left1 = tk.Frame(row1, bg=self.CARD)
+            left1.pack(side="left")
+            ttk.Label(left1, text="Chain Mode:", style="Field.TLabel").pack(side="left", padx=(0, 10))
             self.route_var = tk.StringVar(value=self.config.get("route_mode", "gas"))
-            mode_frame = tk.Frame(cfg_card, bg=self.CARD)
-            mode_frame.grid(row=1, column=1, columnspan=3, sticky="w", pady=4)
             ttk.Radiobutton(
-                mode_frame, text="Via Google Apps Script", variable=self.route_var, value="gas", command=self._on_route_change
-            ).pack(side="left", padx=(0, 12))
+                left1, text="Via Google Apps Script", variable=self.route_var, value="gas", command=self._on_route_change
+            ).pack(side="left", padx=(0, 14))
             ttk.Radiobutton(
-                mode_frame, text="Direct to Backend", variable=self.route_var, value="direct", command=self._on_route_change
+                left1, text="Direct to Backend", variable=self.route_var, value="direct", command=self._on_route_change
             ).pack(side="left")
 
-            ttk.Label(cfg_card, text="Backend Mode:", style="Card.TLabel").grid(row=1, column=4, sticky="w", padx=(12, 4))
+            right1 = tk.Frame(row1, bg=self.CARD)
+            right1.pack(side="right")
+            ttk.Label(right1, text="Backend Mode:", style="Field.TLabel").pack(side="left", padx=(0, 8))
             self.target_var = tk.StringVar(value=self.SRV_PRIORITY_LBL)
-            self.target_combo = ttk.Combobox(cfg_card, textvariable=self.target_var, state="readonly", width=32)
-            self.target_combo.grid(row=1, column=5, columnspan=3, sticky="w", padx=4)
+            self.target_combo = ttk.Combobox(right1, textvariable=self.target_var, state="readonly", width=28)
+            self.target_combo.pack(side="left")
             self.target_combo.bind("<<ComboboxSelected>>", self._on_target_change)
 
-            # Row 2: GAS Distribution Mode + GAS Quota Preset
-            ttk.Label(cfg_card, text="GAS Mode:", style="Card.TLabel").grid(row=2, column=0, sticky="w", padx=(0, 6), pady=4)
-            self.gas_mode_var = tk.StringVar(value=self.config.get("gas_mode", "fair"))
-            gas_mode_frame = tk.Frame(cfg_card, bg=self.CARD)
-            gas_mode_frame.grid(row=2, column=1, columnspan=3, sticky="w", pady=4)
-            ttk.Radiobutton(
-                gas_mode_frame,
-                text="Fair-Share (1/N Equal)",
-                variable=self.gas_mode_var,
-                value="fair",
-                command=self._on_gas_mode_change,
-            ).pack(side="left", padx=(0, 12))
-            ttk.Radiobutton(
-                gas_mode_frame,
-                text="Priority (#1 -> #2 Failover)",
-                variable=self.gas_mode_var,
-                value="priority",
-                command=self._on_gas_mode_change,
-            ).pack(side="left")
+            # Subtle divider inside card
+            tk.Frame(cfg_card, bg=self.BORDER, height=1).pack(fill="x", pady=(0, 10))
 
-            ttk.Label(cfg_card, text="GAS Quota (Free):", style="Card.TLabel").grid(row=2, column=4, sticky="w", padx=(12, 4))
-            init_preset = self.config.get("quota_preset", DEFAULT_PRESET)
-            if init_preset not in GAS_QUOTA_PRESETS:
-                init_preset = DEFAULT_PRESET
-            self.preset_var = tk.StringVar(value=init_preset)
-            self.preset_combo = ttk.Combobox(
-                cfg_card, textvariable=self.preset_var, values=list(GAS_QUOTA_PRESETS.keys()), state="readonly", width=36
-            )
-            self.preset_combo.grid(row=2, column=5, columnspan=3, sticky="w", padx=4)
-            self.preset_combo.bind("<<ComboboxSelected>>", self._on_preset_change)
+            # Row 2: Auth Key (left) & Local Listen + Keep-Awake (right)
+            row2 = tk.Frame(cfg_card, bg=self.CARD)
+            row2.pack(fill="x")
 
-            # Row 3: Auth, Listen IP, Port, Keep-Awake
-            ttk.Label(cfg_card, text="Auth Key:", style="Card.TLabel").grid(row=3, column=0, sticky="w", padx=(0, 6), pady=4)
+            left2 = tk.Frame(row2, bg=self.CARD)
+            left2.pack(side="left")
+            ttk.Label(left2, text="Auth Key:", style="Field.TLabel").pack(side="left", padx=(0, 8))
             self.auth_var = tk.StringVar(value=self.config["auth_key"])
-            self.auth_entry = ttk.Entry(cfg_card, textvariable=self.auth_var, show="*", width=26)
-            self.auth_entry.grid(row=3, column=1, sticky="w", padx=4, pady=4)
+            self.auth_entry = ttk.Entry(left2, textvariable=self.auth_var, show="*", width=26)
+            self.auth_entry.pack(side="left", padx=(0, 8))
             bind_universal_clipboard(self.auth_entry)
 
-            auth_act = tk.Frame(cfg_card, bg=self.CARD)
-            auth_act.grid(row=3, column=2, sticky="w", padx=4)
             self.show_key_var = tk.BooleanVar(value=False)
-            ttk.Checkbutton(auth_act, text="Show", variable=self.show_key_var, command=self._toggle_key).pack(side="left")
+            ttk.Checkbutton(left2, text="Show", variable=self.show_key_var, command=self._toggle_key).pack(side="left", padx=(0, 6))
             tk.Button(
-                auth_act, text="Paste", command=self._paste_auth_key,
-                bg="#e2e8f0", fg=self.TEXT, relief="flat", bd=0, padx=6, pady=2,
-                font=("Segoe UI", 8), cursor="hand2"
-            ).pack(side="left", padx=(4, 0))
+                left2, text="Paste", command=self._paste_auth_key,
+                bg="#e2e8f0", fg=self.TEXT, activebackground="#cbd5e1", relief="flat", bd=0,
+                padx=8, pady=3, font=("Segoe UI", 8, "bold"), cursor="hand2"
+            ).pack(side="left")
 
-            ttk.Label(cfg_card, text="Listen IP:", style="Card.TLabel").grid(row=3, column=3, sticky="w", padx=(12, 4))
+            right2 = tk.Frame(row2, bg=self.CARD)
+            right2.pack(side="right")
+            ttk.Label(right2, text="Listen IP:", style="Field.TLabel").pack(side="left", padx=(0, 6))
             self.host_var = tk.StringVar(value=self.config["listen_host"])
-            ttk.Entry(cfg_card, textvariable=self.host_var, width=14).grid(row=3, column=4, sticky="w", padx=4)
+            ttk.Entry(right2, textvariable=self.host_var, width=14).pack(side="left", padx=(0, 12))
 
-            ttk.Label(cfg_card, text="Port:", style="Card.TLabel").grid(row=3, column=5, sticky="w", padx=(10, 4))
+            ttk.Label(right2, text="Port:", style="Field.TLabel").pack(side="left", padx=(0, 6))
             self.port_var = tk.StringVar(value=str(self.config["listen_port"]))
-            ttk.Entry(cfg_card, textvariable=self.port_var, width=7).grid(row=3, column=6, sticky="w", padx=4)
+            ttk.Entry(right2, textvariable=self.port_var, width=7).pack(side="left", padx=(0, 14))
 
             self.keep_awake_var = tk.BooleanVar(value=bool(self.config.get("keep_awake", True)))
             ttk.Checkbutton(
-                cfg_card,
+                right2,
                 text="Keep Awake (10m)",
                 variable=self.keep_awake_var,
                 command=self._on_keep_awake_change,
-            ).grid(row=3, column=7, sticky="w", padx=6)
+            ).pack(side="left")
 
             # Card 2: Tabbed Pools
-            pool_card = tk.Frame(main, bg=self.CARD, highlightbackground=self.BORDER, highlightthickness=1, padx=12, pady=10)
-            pool_card.pack(fill="both", expand=True, pady=(0, 10))
+            pool_card = tk.Frame(main, bg=self.CARD, highlightbackground=self.BORDER, highlightthickness=1, padx=14, pady=12)
+            pool_card.pack(fill="both", expand=True, pady=(0, 12))
 
             pool_top = tk.Frame(pool_card, bg=self.CARD)
-            pool_top.pack(fill="x", pady=(0, 6))
+            pool_top.pack(fill="x", pady=(0, 4))
             self.stats_var = tk.StringVar(value="Tunnels: 0  |  TX: 0.0 KB  |  RX: 0.0 KB")
             ttk.Label(pool_top, textvariable=self.stats_var, style="Muted.TLabel").pack(side="right")
 
             self.notebook = ttk.Notebook(pool_card)
             self.notebook.pack(fill="both", expand=True)
 
-            # Tab 1: GAS Accounts (with Priority Up/Down)
-            gas_tab = tk.Frame(self.notebook, bg=self.CARD, pady=6)
-            self.notebook.add(gas_tab, text="Google Apps Script Accounts")
+            # Tab 1: GAS Accounts (Fair-Share checkbox + Quota preset right inside this tab!)
+            gas_tab = tk.Frame(self.notebook, bg=self.CARD, pady=8)
+            self.notebook.add(gas_tab, text="  Google Apps Script Accounts  ")
+
+            gas_toolbar = tk.Frame(gas_tab, bg=self.TOOLBAR_BG, highlightbackground=self.BORDER, highlightthickness=1, padx=10, pady=7)
+            gas_toolbar.pack(fill="x", pady=(0, 8))
+
+            self.gas_fair_share_var = tk.BooleanVar(value=(self.config.get("gas_mode", "fair") == "fair"))
+            ttk.Checkbutton(
+                gas_toolbar,
+                text="Fair-Share Quota Distribution (1/N Equal across enabled accounts)",
+                style="Toolbar.TCheckbutton",
+                variable=self.gas_fair_share_var,
+                command=self._on_gas_mode_change,
+            ).pack(side="left")
+
+            quota_box = tk.Frame(gas_toolbar, bg=self.TOOLBAR_BG)
+            quota_box.pack(side="right")
+            ttk.Label(quota_box, text="Free Gmail Quota:", style="Toolbar.TLabel").pack(side="left", padx=(0, 6))
+            init_preset = self.config.get("quota_preset", DEFAULT_PRESET)
+            if init_preset not in GAS_QUOTA_PRESETS:
+                init_preset = DEFAULT_PRESET
+            self.preset_var = tk.StringVar(value=init_preset)
+            self.preset_combo = ttk.Combobox(
+                quota_box, textvariable=self.preset_var, values=list(GAS_QUOTA_PRESETS.keys()), state="readonly", width=36
+            )
+            self.preset_combo.pack(side="left")
+            self.preset_combo.bind("<<ComboboxSelected>>", self._on_preset_change)
 
             gas_wrap = tk.Frame(gas_tab, bg=self.CARD)
             gas_wrap.pack(fill="both", expand=True)
             cols = ("prio", "name", "status", "active", "daily", "share", "latency", "url")
             self.tree = ttk.Treeview(gas_wrap, columns=cols, show="headings", height=6)
             for col, text, w in [
-                ("prio", "Priority", 60),
-                ("name", "Account", 105),
+                ("prio", "#", 45),
+                ("name", "Account", 110),
                 ("status", "Status", 95),
-                ("active", "Active", 60),
+                ("active", "Active", 65),
                 ("daily", "Daily Quota", 105),
-                ("share", "Session %", 70),
-                ("latency", "Latency", 70),
-                ("url", "GAS Web App URL", 290),
+                ("share", "Share %", 70),
+                ("latency", "Latency", 75),
+                ("url", "GAS Web App URL", 320),
             ]:
                 self.tree.heading(col, text=text)
                 self.tree.column(col, width=w, anchor="w" if col in ("name", "url") else "center")
@@ -1211,21 +1252,21 @@ if HAS_TK:
             self._make_btn(gas_btns, "Remove", self.remove_account).pack(side="left", padx=4)
 
             # Tab 2: Backend Servers
-            srv_tab = tk.Frame(self.notebook, bg=self.CARD, pady=6)
-            self.notebook.add(srv_tab, text="Backend Servers (Render / SnappDeploy / Oracle)")
+            srv_tab = tk.Frame(self.notebook, bg=self.CARD, pady=8)
+            self.notebook.add(srv_tab, text="  Backend Servers (Render / SnappDeploy / Oracle)  ")
 
             srv_wrap = tk.Frame(srv_tab, bg=self.CARD)
             srv_wrap.pack(fill="both", expand=True)
             scols = ("prio", "name", "status", "requests", "errors", "latency", "url")
-            self.srv_tree = ttk.Treeview(srv_wrap, columns=scols, show="headings", height=6)
+            self.srv_tree = ttk.Treeview(srv_wrap, columns=scols, show="headings", height=7)
             for col, text, w in [
-                ("prio", "Priority", 65),
-                ("name", "Server Name", 150),
+                ("prio", "#", 45),
+                ("name", "Server Name", 170),
                 ("status", "Status", 100),
                 ("requests", "Requests", 80),
                 ("errors", "Errors", 65),
                 ("latency", "Latency", 80),
-                ("url", "Server URL (e.g. https://app.onrender.com)", 320),
+                ("url", "Server URL (e.g. https://app.onrender.com)", 340),
             ]:
                 self.srv_tree.heading(col, text=text)
                 self.srv_tree.column(col, width=w, anchor="w" if col in ("name", "url") else "center")
@@ -1244,15 +1285,20 @@ if HAS_TK:
             self._make_btn(srv_btns, "Remove", self.remove_server).pack(side="left", padx=4)
 
             # Card 3: Activity Log
-            log_card = tk.Frame(main, bg=self.CARD, highlightbackground=self.BORDER, highlightthickness=1, padx=12, pady=10)
+            log_card = tk.Frame(main, bg=self.CARD, highlightbackground=self.BORDER, highlightthickness=1, padx=14, pady=10)
             log_card.pack(fill="both", expand=False)
 
             log_hdr = tk.Frame(log_card, bg=self.CARD)
             log_hdr.pack(fill="x", pady=(0, 6))
             ttk.Label(log_hdr, text="Activity Log", style="Section.TLabel").pack(side="left")
+            tk.Button(
+                log_hdr, text="Clear", command=self._clear_log,
+                bg="#e2e8f0", fg=self.TEXT, activebackground="#cbd5e1", relief="flat", bd=0,
+                padx=8, pady=2, font=("Segoe UI", 8), cursor="hand2"
+            ).pack(side="right", padx=(8, 0))
             ttk.Label(
                 log_hdr,
-                text="Free Gmail GAS limit: 30 concurrent / 20k per day. Keep-Awake keeps #1 (or all in Fair-Share) awake.",
+                text="Free Gmail GAS limit: 30 concurrent / 20k per day",
                 style="Muted.TLabel",
             ).pack(side="right")
 
@@ -1265,10 +1311,15 @@ if HAS_TK:
                 fg="#e2e8f0",
                 insertbackground="#ffffff",
                 relief="flat",
-                padx=8,
-                pady=6,
+                padx=10,
+                pady=8,
             )
             self.log_text.pack(fill="both", expand=True)
+
+        def _clear_log(self):
+            self.log_text.configure(state="normal")
+            self.log_text.delete("1.0", "end")
+            self.log_text.configure(state="disabled")
 
         def _toggle_key(self):
             self.auth_entry.configure(show="" if self.show_key_var.get() else "*")
@@ -1311,11 +1362,12 @@ if HAS_TK:
             self.log(f"Backend Mode set to: {val}")
 
         def _on_gas_mode_change(self):
-            gmode = self.gas_mode_var.get()
+            gmode = "fair" if self.gas_fair_share_var.get() else "priority"
             conc, daily, rpm = GAS_QUOTA_PRESETS.get(self.preset_var.get(), (18, 14000, 120))
             self.pool.update_limits(conc, daily, rpm, gas_mode=gmode)
             self._save_config()
-            self.log(f"GAS Distribution Mode set to: {gmode}")
+            lbl = "Fair-Share (1/N Equal)" if gmode == "fair" else "Priority (#1 -> #2 Failover)"
+            self.log(f"GAS Quota Distribution set to: {lbl}")
 
         def _on_preset_change(self, _event=None):
             preset = self.preset_var.get()
@@ -1631,7 +1683,7 @@ if HAS_TK:
 
             self._save_config()
             conc, daily, rpm = GAS_QUOTA_PRESETS.get(self.preset_var.get(), (18, 14000, 120))
-            self.pool.update_limits(conc, daily, rpm, gas_mode=self.gas_mode_var.get())
+            self.pool.update_limits(conc, daily, rpm, gas_mode=("fair" if self.gas_fair_share_var.get() else "priority"))
             try:
                 self.proxy = FreeDnetProxyServer(
                     pool=self.pool,
@@ -1693,10 +1745,18 @@ if HAS_TK:
             return (f"#{idx + 1}", srv.name, srv.status_label, srv.total_requests, srv.errors, lat, srv.url)
 
         def _schedule_ui_tick(self):
-            while not self.log_queue.empty():
-                line = self.log_queue.get_nowait()
+            lines = []
+            while len(lines) < 60:
+                try:
+                    lines.append(self.log_queue.get_nowait())
+                except queue.Empty:
+                    break
+            if lines:
                 self.log_text.configure(state="normal")
-                self.log_text.insert("end", line)
+                self.log_text.insert("end", "".join(lines))
+                line_count = int(self.log_text.index("end-1c").split(".")[0])
+                if line_count > 500:
+                    self.log_text.delete("1.0", f"{line_count - 400}.0")
                 self.log_text.see("end")
                 self.log_text.configure(state="disabled")
 
