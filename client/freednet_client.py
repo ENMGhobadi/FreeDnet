@@ -1549,6 +1549,7 @@ LANGUAGES = {
         "add_server": "+ Add Server",
         "deploy_render": "🚀 Deploy on Render",
         "deploy_snap": "🚀 Deploy on SnapDeploy",
+        "deploy_cf": "🚀 Deploy on Cloudflare",
         "remove_btn": "Remove",
         "srv_headers": ["#", "Server Name", "Status", "Requests", "Errors", "Latency", "Server URL"],
         "diag_title": "Real Exit IP & Country Check",
@@ -1613,6 +1614,7 @@ LANGUAGES = {
         "add_server": "+ افزودن سرور",
         "deploy_render": "🚀 دیپلوی روی Render",
         "deploy_snap": "🚀 دیپلوی روی SnapDeploy",
+        "deploy_cf": "🚀 دیپلوی روی Cloudflare",
         "remove_btn": "حذف",
         "srv_headers": ["#", "نام سرور", "وضعیت", "درخواست‌ها", "خطاها", "تاخیر", "آدرس سرور"],
         "diag_title": "بررسی آی‌پی خروجی و کشور واقعی",
@@ -1677,6 +1679,7 @@ LANGUAGES = {
         "add_server": "+ 添加服务器",
         "deploy_render": "🚀 部署到 Render",
         "deploy_snap": "🚀 部署到 SnapDeploy",
+        "deploy_cf": "🚀 部署到 Cloudflare",
         "remove_btn": "删除",
         "srv_headers": ["#", "服务器名称", "状态", "请求数", "错误数", "延迟", "服务器 URL"],
         "diag_title": "真实出口 IP 与国家/地区检测",
@@ -1741,6 +1744,7 @@ LANGUAGES = {
         "add_server": "+ Añadir Servidor",
         "deploy_render": "🚀 Desplegar en Render",
         "deploy_snap": "🚀 Desplegar en SnapDeploy",
+        "deploy_cf": "🚀 Desplegar en Cloudflare",
         "remove_btn": "Eliminar",
         "srv_headers": ["#", "Servidor", "Estado", "Peticiones", "Errores", "Latencia", "URL del Servidor"],
         "diag_title": "Comprobación Real de IP y País",
@@ -1805,6 +1809,7 @@ LANGUAGES = {
         "add_server": "+ Server hinzufügen",
         "deploy_render": "🚀 Auf Render deployen",
         "deploy_snap": "🚀 Auf SnapDeploy deployen",
+        "deploy_cf": "🚀 Auf Cloudflare deployen",
         "remove_btn": "Entfernen",
         "srv_headers": ["#", "Servername", "Status", "Anfragen", "Fehler", "Latenz", "Server-URL"],
         "diag_title": "Echte Ausgangs-IP & Länderprüfung",
@@ -1869,6 +1874,7 @@ LANGUAGES = {
         "add_server": "+ Добавить сервер",
         "deploy_render": "🚀 Деплой на Render",
         "deploy_snap": "🚀 Деплой на SnapDeploy",
+        "deploy_cf": "🚀 Деплой на Cloudflare",
         "remove_btn": "Удалить",
         "srv_headers": ["#", "Сервер", "Статус", "Запросы", "Ошибки", "Пинг", "URL сервера"],
         "diag_title": "Проверка реального IP и страны",
@@ -1933,6 +1939,7 @@ LANGUAGES = {
         "add_server": "+ サーバー追加",
         "deploy_render": "🚀 Render にデプロイ",
         "deploy_snap": "🚀 SnapDeploy にデプロイ",
+        "deploy_cf": "🚀 Cloudflare にデプロイ",
         "remove_btn": "削除",
         "srv_headers": ["#", "サーバー名", "状態", "リクエスト", "エラー", "遅延", "サーバー URL"],
         "diag_title": "出口 IP・国チェック",
@@ -1997,6 +2004,7 @@ LANGUAGES = {
         "add_server": "+ 서버 추가",
         "deploy_render": "🚀 Render에 배포",
         "deploy_snap": "🚀 SnapDeploy에 배포",
+        "deploy_cf": "🚀 Cloudflare에 배포",
         "remove_btn": "삭제",
         "srv_headers": ["#", "서버 이름", "상태", "요청 수", "오류", "지연", "서버 URL"],
         "diag_title": "실제 출구 IP 및 국가 확인",
@@ -2180,6 +2188,79 @@ class SnapDeployDialog(QDialog):
             "api_key": self.api_key_edit.text().strip(),
             "name": self.name_edit.text().strip(),
             "repo": repo,
+            "auth_key": self.auth_edit.text().strip() or "change-me-freednet-key",
+        }
+
+
+CF_LOCATIONS = [
+    ("Auto (Nearest)", ""),
+    ("Western Europe (EU)", "weur"),
+    ("Eastern Europe (EU)", "eeur"),
+    ("Eastern North America (US)", "enam"),
+    ("Western North America (US)", "wnam"),
+    ("Asia-Pacific (APAC)", "apac"),
+]
+
+
+class CloudflareDeployDialog(QDialog):
+    def __init__(self, parent, default_auth_key: str):
+        super().__init__(parent)
+        self.setWindowTitle("Deploy FreeDnet Worker on Cloudflare")
+        self.setMinimumWidth(520)
+
+        layout = QVBoxLayout(self)
+        form = QFormLayout()
+
+        self.account_edit = QLineEdit()
+        self.account_edit.setPlaceholderText("32-char Cloudflare Account ID")
+        form.addRow("Account ID:", self.account_edit)
+
+        self.token_edit = QLineEdit()
+        self.token_edit.setEchoMode(QLineEdit.Password)
+        self.token_edit.setPlaceholderText("Cloudflare API Token (Workers Scripts:Edit)")
+        form.addRow("API Token:", self.token_edit)
+
+        self.name_edit = QLineEdit(f"freednet-cf-{int(time.time()) % 10000}")
+        form.addRow("Worker Name:", self.name_edit)
+
+        self.loc_combo = QComboBox()
+        for label, hint in CF_LOCATIONS:
+            self.loc_combo.addItem(label, hint)
+        form.addRow("Location Hint:", self.loc_combo)
+
+        self.auth_edit = QLineEdit(default_auth_key)
+        form.addRow("AUTH_KEY (Env):", self.auth_edit)
+
+        layout.addLayout(form)
+        hint = QLabel("Deploys Worker + SQLite Durable Object (Free plan compatible). Ensure workers.dev subdomain is enabled in Cloudflare.", objectName="Muted")
+        hint.setWordWrap(True)
+        layout.addWidget(hint)
+
+        buttons = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
+        buttons.button(QDialogButtonBox.Ok).setText("Deploy Now")
+        buttons.accepted.connect(self._on_accept)
+        buttons.rejected.connect(self.reject)
+        layout.addWidget(buttons)
+
+    def _on_accept(self):
+        if not self.account_edit.text().strip():
+            QMessageBox.warning(self, "Missing Account ID", "Please enter your Cloudflare Account ID.")
+            return
+        if not self.token_edit.text().strip():
+            QMessageBox.warning(self, "Missing API Token", "Please enter your Cloudflare API Token.")
+            return
+        if not self.name_edit.text().strip():
+            QMessageBox.warning(self, "Missing Name", "Please enter a Worker Name.")
+            return
+        self.accept()
+
+    def values(self) -> dict:
+        return {
+            "account_id": self.account_edit.text().strip(),
+            "api_token": self.token_edit.text().strip(),
+            "name": self.name_edit.text().strip().lower(),
+            "location_hint": self.loc_combo.currentData(),
+            "location_label": self.loc_combo.currentText(),
             "auth_key": self.auth_edit.text().strip() or "change-me-freednet-key",
         }
 
@@ -2558,6 +2639,10 @@ class FreeDnetProWindow(QMainWindow):
         self.deploy_snap_btn = QPushButton("🚀 Deploy on SnapDeploy")
         self.deploy_snap_btn.clicked.connect(self.deploy_on_snapdeploy)
         st_lay.addWidget(self.deploy_snap_btn)
+        st_lay.addSpacing(4)
+        self.deploy_cf_btn = QPushButton("🚀 Deploy on Cloudflare")
+        self.deploy_cf_btn.clicked.connect(self.deploy_on_cloudflare)
+        st_lay.addWidget(self.deploy_cf_btn)
         st_lay.addSpacing(4)
         self.add_s_btn = QPushButton("+ Add Server", objectName="PrimaryBtn")
         add_s = self.add_s_btn
@@ -3000,6 +3085,7 @@ class FreeDnetProWindow(QMainWindow):
         self.lbl_backend_mode.setText(self._t("backend_mode"))
         self.deploy_render_btn.setText(self._t("deploy_render"))
         self.deploy_snap_btn.setText(self._t("deploy_snap"))
+        self.deploy_cf_btn.setText(self._t("deploy_cf"))
         self.add_s_btn.setText(self._t("add_server"))
         self.rem_s_btn.setText(self._t("remove_btn"))
         self.srv_table.setHorizontalHeaderLabels(self._t("srv_headers"))
@@ -3205,6 +3291,127 @@ class FreeDnetProWindow(QMainWindow):
                 self.log(f"SnapDeploy FAILED (HTTP {e.code}): {err_body}")
             except Exception as e:
                 self.log(f"SnapDeploy FAILED: {e}")
+            finally:
+                self._stop_busy(tid)
+
+        threading.Thread(target=worker, daemon=True).start()
+
+    def _load_cf_worker_source(self) -> str:
+        candidates = [
+            os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "cloudflare", "worker.js"),
+            os.path.join(BASE_DIR, "cloudflare", "worker.js"),
+            _resource_path(os.path.join("cloudflare", "worker.js")),
+        ]
+        for cp in candidates:
+            if os.path.exists(cp):
+                with open(cp, "r", encoding="utf-8") as f:
+                    return f.read()
+        raise FileNotFoundError("cloudflare/worker.js not found. Make sure cloudflare/worker.js exists in the repo.")
+
+    def deploy_on_cloudflare(self):
+        dlg = CloudflareDeployDialog(self, self.auth_edit.text().strip() or "change-me-freednet-key")
+        if dlg.exec() != QDialog.Accepted:
+            return
+        params = dlg.values()
+
+        def worker():
+            tid = self._start_busy(f"Deploying {params['name']} on Cloudflare...")
+            try:
+                worker_js = self._load_cf_worker_source()
+                acc_id = params["account_id"]
+                name = params["name"]
+                headers_auth = {
+                    "Authorization": f"Bearer {params['api_token']}",
+                    "User-Agent": "FreeDnet-Client/2.0",
+                }
+
+                # 1. Fetch workers.dev subdomain
+                req_sub = urllib.request.Request(
+                    f"https://api.cloudflare.com/client/v4/accounts/{acc_id}/workers/subdomain",
+                    headers={**headers_auth, "Accept": "application/json"},
+                    method="GET",
+                )
+                with _DIRECT_OPENER.open(req_sub, timeout=20.0) as resp:
+                    sub_data = json.loads(resp.read().decode("utf-8", errors="replace"))
+                subdomain = (sub_data.get("result") or {}).get("subdomain", "").strip()
+                if not subdomain:
+                    raise RuntimeError("No workers.dev subdomain found. Enable workers.dev once in Cloudflare Dashboard.")
+
+                # 2. Multipart upload Worker + SQLite Durable Object migration
+                def build_multipart(include_migration: bool):
+                    boundary = f"----FreeDnetCF{int(time.time() * 1000)}"
+                    meta = {
+                        "main_module": "worker.js",
+                        "compatibility_date": "2025-01-01",
+                        "bindings": [
+                            {"type": "durable_object_namespace", "name": "TUNNEL_DO", "class_name": "TunnelSessionDO"},
+                            {"type": "plain_text", "name": "AUTH_KEY", "text": params["auth_key"]},
+                            {"type": "plain_text", "name": "LOCATION_HINT", "text": params["location_hint"]},
+                        ],
+                    }
+                    if include_migration:
+                        meta["migrations"] = {"new_sqlite_classes": ["TunnelSessionDO"], "tag": "v1"}
+                    parts = [
+                        (
+                            f"--{boundary}\r\n"
+                            f'Content-Disposition: form-data; name="metadata"\r\n'
+                            f"Content-Type: application/json\r\n\r\n"
+                            f"{json.dumps(meta)}\r\n"
+                        ).encode("utf-8"),
+                        (
+                            f"--{boundary}\r\n"
+                            f'Content-Disposition: form-data; name="worker.js"; filename="worker.js"\r\n'
+                            f"Content-Type: application/javascript+module\r\n\r\n"
+                            f"{worker_js}\r\n"
+                            f"--{boundary}--\r\n"
+                        ).encode("utf-8"),
+                    ]
+                    return b"".join(parts), f"multipart/form-data; boundary={boundary}"
+
+                url_upload = f"https://api.cloudflare.com/client/v4/accounts/{acc_id}/workers/scripts/{name}"
+                try:
+                    body_bytes, ctype = build_multipart(include_migration=True)
+                    req_up = urllib.request.Request(
+                        url_upload,
+                        data=body_bytes,
+                        headers={**headers_auth, "Content-Type": ctype},
+                        method="PUT",
+                    )
+                    with _DIRECT_OPENER.open(req_up, timeout=30.0) as resp:
+                        resp.read()
+                except urllib.error.HTTPError as e:
+                    err_txt = e.read().decode("utf-8", errors="replace")
+                    if e.code == 400 and "migration" in err_txt.lower():
+                        body_bytes, ctype = build_multipart(include_migration=False)
+                        req_up2 = urllib.request.Request(
+                            url_upload,
+                            data=body_bytes,
+                            headers={**headers_auth, "Content-Type": ctype},
+                            method="PUT",
+                        )
+                        with _DIRECT_OPENER.open(req_up2, timeout=30.0) as resp:
+                            resp.read()
+                    else:
+                        raise RuntimeError(f"HTTP {e.code}: {err_txt[:260]}")
+
+                # 3. Enable workers.dev route for this script
+                req_en = urllib.request.Request(
+                    f"https://api.cloudflare.com/client/v4/accounts/{acc_id}/workers/scripts/{name}/subdomain",
+                    data=json.dumps({"enabled": True}).encode("utf-8"),
+                    headers={**headers_auth, "Content-Type": "application/json"},
+                    method="POST",
+                )
+                with _DIRECT_OPENER.open(req_en, timeout=20.0) as resp:
+                    resp.read()
+
+                worker_url = f"https://{name}.{subdomain}.workers.dev"
+                self._pending_render_srv = (f"Cloudflare ({name})", worker_url)
+                self.log(f"Cloudflare Deploy OK -> {worker_url}")
+            except urllib.error.HTTPError as e:
+                err_body = e.read().decode("utf-8", errors="replace")[:260]
+                self.log(f"Cloudflare Deploy FAILED (HTTP {e.code}): {err_body}")
+            except Exception as e:
+                self.log(f"Cloudflare Deploy FAILED: {e}")
             finally:
                 self._stop_busy(tid)
 
