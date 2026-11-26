@@ -15,6 +15,7 @@ import subprocess
 import sys
 import threading
 import time
+import traceback
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -48,6 +49,10 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
+_APP_DIR = os.path.dirname(os.path.abspath(__file__))
+if _APP_DIR not in sys.path:
+    sys.path.insert(0, _APP_DIR)
+
 from fd_config import (
     BASE_DIR,
     CONFIG_PATH,
@@ -70,6 +75,7 @@ from fd_config import (
     set_windows_system_proxy,
 )
 from fd_dialogs import (
+    AppRoutingDialog,
     CloudflareDeployDialog,
     EntryDialog,
     FlowLayout,
@@ -356,7 +362,7 @@ class FreeDnetProWindow(QMainWindow):
         body.addWidget(self.tabs, stretch=1)
 
         # ==========================================================
-        # TAB 1: OVERVIEW (KPIs + Routing)
+        # TAB 1: OVERVIEW (KPIs + Routing + Quick Diagnostics)
         # ==========================================================
         ov_tab = QWidget()
         ov_lay = QVBoxLayout(ov_tab)
@@ -501,6 +507,10 @@ class FreeDnetProWindow(QMainWindow):
         self.target_combo.setMinimumWidth(250)
         self.target_combo.currentTextChanged.connect(self._on_target_change)
         st_lay.addWidget(self.target_combo)
+        st_lay.addSpacing(4)
+        self.app_routing_btn = QPushButton("🔀 App Routing")
+        self.app_routing_btn.clicked.connect(self.open_app_routing_dialog)
+        st_lay.addWidget(self.app_routing_btn)
         st_lay.addStretch()
         self.deploy_render_btn = QPushButton("🚀 Deploy on Render")
         self.deploy_render_btn.clicked.connect(self.deploy_on_render)
@@ -866,6 +876,40 @@ class FreeDnetProWindow(QMainWindow):
             self.target_combo.setCurrentText(self.SRV_PRIORITY_LBL)
         self.target_combo.blockSignals(False)
 
+    def _refresh_app_routing_btn(self):
+        if not hasattr(self, "app_routing_btn"):
+            return
+        base = self._t("app_routing_btn")
+        if self.config.get("app_routing_enabled"):
+            cnt = len(self.config.get("app_routes") or [])
+            self.app_routing_btn.setText(f"{base} ({cnt})")
+        else:
+            self.app_routing_btn.setText(base)
+
+    def open_app_routing_dialog(self):
+        srv_names = [s.name for s in self.server_pool.servers if s.enabled]
+        if not srv_names:
+            srv_names = [s.name for s in self.server_pool.servers]
+        dlg = AppRoutingDialog(
+            self,
+            enabled=bool(self.config.get("app_routing_enabled", False)),
+            routes=self.config.get("app_routes", []),
+            server_names=srv_names,
+            tr=self._t,
+        )
+        if dlg.exec():
+            enabled, routes = dlg.result_data()
+            self.config["app_routing_enabled"] = enabled
+            self.config["app_routes"] = routes
+            self._save_config()
+            self._refresh_app_routing_btn()
+            self.log(f"Per-App Routing updated: enabled={enabled}, rules={len(routes)}")
+            self.notify(self._t("app_routing_saved"), "success", 4000)
+            if self.tun_active:
+                self.log("Reloading TUN Mode to apply Per-App Routing rules...")
+                self._stop_tun_process()
+                self._start_tun_now()
+
     def _on_target_change(self, val: str):
         if not val:
             return
@@ -977,6 +1021,7 @@ class FreeDnetProWindow(QMainWindow):
         self.gas_table.setHorizontalHeaderLabels(self._t("gas_headers"))
 
         self.lbl_backend_mode.setText(self._t("backend_mode"))
+        self._refresh_app_routing_btn()
         self.deploy_render_btn.setText(self._t("deploy_render"))
         self.deploy_snap_btn.setText(self._t("deploy_snap"))
         self.deploy_cf_btn.setText(self._t("deploy_cf"))
@@ -1399,7 +1444,6 @@ class FreeDnetProWindow(QMainWindow):
                 if lat is not None:
                     self._pending_srv_queue.put((label, worker_url, lat))
                     self.log(f"✅ {label} is LIVE & READY ({lat} ms) -> {worker_url} | Added to Backend Servers.")
-                    self.notify(f"{label} is LIVE & READY ({lat} ms)!", "success")
                 else:
                     self._pending_srv_queue.put((label, worker_url, 0))
                     self.log(f"⚠️ {label} deployed -> {worker_url} | Added to Backend Servers (check Ping).")
@@ -1810,8 +1854,44 @@ class FreeDnetProWindow(QMainWindow):
             except Exception:
                 pass
 
+        app_outbounds = []
+        app_rules = []
+        if self.config.get("app_routing_enabled"):
+            srv_tag_map: dict[str, str] = {}
+            enabled_names = {s.name for s in self.server_pool.servers if s.enabled}
+            for rule in self.config.get("app_routes") or []:
+                proc = (rule.get("process") or "").strip()
+                srv_name = (rule.get("server") or "").strip()
+                if not proc or not srv_name:
+                    continue
+                if srv_name == AppRoutingDialog.DIRECT_TOKEN:
+                    app_rules.append({"type": "field", "process": [proc], "outboundTag": "direct"})
+                    continue
+                if enabled_names and srv_name not in enabled_names:
+                    continue
+                if srv_name not in srv_tag_map:
+                    tag = f"app-srv-{len(srv_tag_map)}"
+                    srv_tag_map[srv_name] = tag
+                    app_outbounds.append({
+                        "tag": tag,
+                        "protocol": "socks",
+                        "settings": {
+                            "servers": [{
+                                "address": host,
+                                "port": port,
+                                "users": [{"user": srv_name, "pass": "fd"}],
+                            }]
+                        },
+                    })
+                app_rules.append({
+                    "type": "field",
+                    "process": [proc],
+                    "network": "tcp",
+                    "outboundTag": srv_tag_map[srv_name],
+                })
+
         cfg = {
-            "log": {"loglevel": "warning"},
+            "log": {"loglevel": "none"},
             "inbounds": [
                 {
                     "tag": "tun-in",
@@ -1834,6 +1914,7 @@ class FreeDnetProWindow(QMainWindow):
                     if self.config.get("chain_enabled") and self.config.get("chain_uri", "").strip()
                     else []
                 ),
+                *app_outbounds,
                 {
                     "tag": "freednet-socks",
                     "protocol": "socks",
@@ -1859,6 +1940,7 @@ class FreeDnetProWindow(QMainWindow):
                         if os.path.exists(os.path.join(XRAY_DIR, "geosite.dat"))
                         else []
                     ),
+                    *app_rules,
                     {
                         "type": "field",
                         "network": "tcp",
@@ -2194,15 +2276,25 @@ class FreeDnetProWindow(QMainWindow):
 
 
 def main():
-    enable_windows_dpi_awareness()
-    app = QApplication(sys.argv)
-    app.setStyle("Fusion")
-    ico = _resource_path("freednet.ico")
-    if os.path.exists(ico):
-        app.setWindowIcon(QIcon(ico))
-    win = FreeDnetProWindow()
-    win.show()
-    sys.exit(app.exec())
+    try:
+        enable_windows_dpi_awareness()
+        app = QApplication(sys.argv)
+        app.setStyle("Fusion")
+        ico = _resource_path("freednet.ico")
+        if os.path.exists(ico):
+            app.setWindowIcon(QIcon(ico))
+        win = FreeDnetProWindow()
+        win.show()
+        sys.exit(app.exec())
+    except Exception:
+        err = traceback.format_exc()
+        if sys.platform == "win32":
+            try:
+                ctypes.windll.user32.MessageBoxW(0, err[-1800:], "FreeDnet Startup Error", 0x10)
+            except Exception:
+                pass
+        sys.stderr.write(err + "\n")
+        sys.exit(1)
 
 
 if __name__ == "__main__":
