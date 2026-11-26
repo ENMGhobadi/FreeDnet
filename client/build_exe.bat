@@ -1,10 +1,9 @@
 @echo off
 setlocal
-title Build FreeDnet.exe (Windows x64)
+title Build FreeDnet.exe & FreeDnet-Setup.exe (Windows x64)
 cd /d "%~dp0"
 
-echo Building standalone FreeDnet.exe with PyInstaller...
-
+echo [1/3] Generating icon & checking dependencies...
 set "PY=python"
 if exist ".venv\Scripts\python.exe" (
     set "PY=.venv\Scripts\python.exe"
@@ -40,11 +39,12 @@ if errorlevel 1 (
 )
 
 :build
+echo [2/3] Building standalone FreeDnet.exe...
 if exist "build" rmdir /s /q "build"
 if exist "FreeDnet.spec" del /q "FreeDnet.spec"
 if exist "dist\FreeDnet.exe" del /q "dist\FreeDnet.exe"
 
-"%PY%" -m PyInstaller --noconfirm --clean --onefile --windowed --icon=freednet.ico --name FreeDnet ^
+"%PY%" -m PyInstaller --noconfirm --clean --onefile --windowed --icon=freednet.ico --add-data "freednet.ico;." --name FreeDnet ^
   --exclude-module PySide6.QtWebEngineCore ^
   --exclude-module PySide6.QtWebEngineWidgets ^
   --exclude-module PySide6.QtWebEngineQuick ^
@@ -76,7 +76,35 @@ if not exist "dist\FreeDnet.exe" (
 )
 
 echo.
-echo Success! Your standalone executable is ready at:
-echo   %cd%\dist\FreeDnet.exe
-for %%A in ("dist\FreeDnet.exe") do echo   Size: %%~zA bytes
+echo [3/3] Building Next-Next Windows 11 Installer (FreeDnet-Setup.exe)...
+set "ISCC="
+if exist "%LOCALAPPDATA%\Programs\Inno Setup 6\ISCC.exe" set "ISCC=%LOCALAPPDATA%\Programs\Inno Setup 6\ISCC.exe"
+if exist "C:\Program Files (x86)\Inno Setup 6\ISCC.exe" set "ISCC=C:\Program Files (x86)\Inno Setup 6\ISCC.exe"
+if exist "C:\Program Files\Inno Setup 6\ISCC.exe" set "ISCC=C:\Program Files\Inno Setup 6\ISCC.exe"
+
+if "%ISCC%"=="" (
+    where winget >nul 2>&1
+    if not errorlevel 1 (
+        echo Inno Setup 6 not found. Installing via winget...
+        winget install -e --id JRSoftware.InnoSetup --accept-package-agreements --accept-source-agreements
+        if exist "%LOCALAPPDATA%\Programs\Inno Setup 6\ISCC.exe" set "ISCC=%LOCALAPPDATA%\Programs\Inno Setup 6\ISCC.exe"
+        if exist "C:\Program Files (x86)\Inno Setup 6\ISCC.exe" set "ISCC=C:\Program Files (x86)\Inno Setup 6\ISCC.exe"
+    )
+)
+
+if not "%ISCC%"=="" (
+    "%ISCC%" installer.iss
+    if exist "dist\FreeDnet-Setup.exe" (
+        echo.
+        echo Success! Both files are ready:
+        echo   Portable EXE : %cd%\dist\FreeDnet.exe
+        echo   Setup Wizard : %cd%\dist\FreeDnet-Setup.exe
+        pause
+        exit /b 0
+    )
+)
+
+echo.
+echo Portable EXE ready: %cd%\dist\FreeDnet.exe
+echo NOTE: To also compile FreeDnet-Setup.exe, install Inno Setup 6 ^(jrsoftware.org^) and re-run build_exe.bat.
 pause

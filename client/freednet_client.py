@@ -31,6 +31,19 @@ import zipfile
 
 
 
+def _resource_path(rel_path: str) -> str:
+    candidates = []
+    if hasattr(sys, "_MEIPASS"):
+        candidates.append(os.path.join(sys._MEIPASS, rel_path))
+    if getattr(sys, "frozen", False):
+        candidates.append(os.path.join(os.path.dirname(os.path.abspath(sys.executable)), rel_path))
+    candidates.append(os.path.join(os.path.dirname(os.path.abspath(__file__)), rel_path))
+    for p in candidates:
+        if os.path.exists(p):
+            return p
+    return candidates[0]
+
+
 def _resolve_base_dir() -> str:
     if getattr(sys, "frozen", False):
         exe_dir = os.path.dirname(os.path.abspath(sys.executable))
@@ -38,7 +51,11 @@ def _resolve_base_dir() -> str:
             parent_dir = os.path.dirname(exe_dir)
             if os.path.exists(os.path.join(parent_dir, "freednet_client.py")) or os.path.exists(os.path.join(parent_dir, "config.json")):
                 return parent_dir
-        return exe_dir
+        if os.path.exists(os.path.join(exe_dir, "config.json")):
+            return exe_dir
+        appdata_dir = os.path.join(os.environ.get("APPDATA", exe_dir), "FreeDnet")
+        os.makedirs(appdata_dir, exist_ok=True)
+        return appdata_dir
     return os.path.dirname(os.path.abspath(__file__))
 
 
@@ -958,7 +975,7 @@ class FreeDnetProxyServer:
                 return
 
 from PySide6.QtCore import Qt, QTimer
-from PySide6.QtGui import QAction, QColor
+from PySide6.QtGui import QAction, QColor, QIcon
 from PySide6.QtWidgets import (
     QAbstractItemView,
     QApplication,
@@ -978,6 +995,7 @@ from PySide6.QtWidgets import (
     QMessageBox,
     QPushButton,
     QRadioButton,
+    QSystemTrayIcon,
     QTabWidget,
     QTableWidget,
     QTableWidgetItem,
@@ -1259,6 +1277,8 @@ class FreeDnetProWindow(QMainWindow):
             server_mode=self.config.get("server_mode", "priority"),
         )
 
+        self._force_quit = False
+        self._tray_notified = False
         self.proxy = None
         self.xray_proc = None
         self.tun_active = False
@@ -1270,7 +1290,11 @@ class FreeDnetProWindow(QMainWindow):
         self._peak_tx_rate = 0.0
         self._peak_rx_rate = 0.0
 
+        icon_path = _resource_path("freednet.ico")
+        if os.path.exists(icon_path):
+            self.setWindowIcon(QIcon(icon_path))
         self._build_ui()
+        self._setup_tray(icon_path)
         if self._config_load_err:
             self.log(self._config_load_err)
         self._refresh_target_dropdown()
@@ -1307,7 +1331,64 @@ class FreeDnetProWindow(QMainWindow):
         with open(CONFIG_PATH, "w", encoding="utf-8") as f:
             json.dump(self.config, f, indent=2)
 
+    def _setup_tray(self, icon_path: str):
+        if not QSystemTrayIcon.isSystemTrayAvailable():
+            self.tray = None
+            return
+        icon = QIcon(icon_path) if os.path.exists(icon_path) else self.windowIcon()
+        self.tray = QSystemTrayIcon(icon, self)
+        self.tray.setToolTip("FreeDnet Pro")
+
+        menu = QMenu(self)
+        act_open = menu.addAction("Open FreeDnet")
+        act_open.triggered.connect(self._restore_from_tray)
+        self.tray_proxy_act = menu.addAction("Start Proxy")
+        self.tray_proxy_act.triggered.connect(self.toggle_proxy)
+        self.tray_tun_act = menu.addAction("TUN Mode: OFF")
+        self.tray_tun_act.triggered.connect(self.toggle_tun_mode)
+        menu.addSeparator()
+        act_exit = menu.addAction("Exit")
+        act_exit.triggered.connect(self._quit_app)
+
+        self.tray.setContextMenu(menu)
+        self.tray.activated.connect(self._on_tray_activated)
+        self.tray.show()
+
+    def _on_tray_activated(self, reason):
+        if reason in (QSystemTrayIcon.Trigger, QSystemTrayIcon.DoubleClick):
+            self._restore_from_tray()
+
+    def _restore_from_tray(self):
+        self.showNormal()
+        self.raise_()
+        self.activateWindow()
+
+    def _quit_app(self):
+        self._force_quit = True
+        try:
+            self._stop_tun_process()
+            self._save_config()
+            if self.proxy and self.proxy.running:
+                self.proxy.stop()
+            if getattr(self, "tray", None):
+                self.tray.hide()
+        except Exception:
+            pass
+        QApplication.quit()
+
     def closeEvent(self, event):
+        if not self._force_quit and getattr(self, "tray", None) and self.tray.isVisible():
+            event.ignore()
+            self.hide()
+            if not self._tray_notified:
+                self._tray_notified = True
+                self.tray.showMessage(
+                    "FreeDnet Pro",
+                    "Running in background. Right-click tray icon and choose Exit to close.",
+                    QSystemTrayIcon.Information,
+                    2500,
+                )
+            return
         try:
             self._stop_tun_process()
             self._save_config()
@@ -1914,7 +1995,7 @@ class FreeDnetProWindow(QMainWindow):
                     self.log(f"GAS Ping OK [{acc.name}]: {lat} ms")
                 else:
                     acc.last_error = res.get("error", "Error")
-                    self.log(f"GAS Ping FAILED [{acc.name}]: {self.last_error if hasattr(self, 'last_error') else acc.last_error}")
+                    self.log(f"GAS Ping FAILED [{acc.name}]: {acc.last_error}")
 
             if any(s is not None for s in servers):
                 first_gas = next((a for a in self.pool.accounts if a.enabled), self.pool.accounts[0])
@@ -2351,12 +2432,20 @@ class FreeDnetProWindow(QMainWindow):
             self.kpi_tunnels.setText("0")
             self.kpi_speed.setText("0 B/s  |  0 B/s")
 
+        if getattr(self, "tray", None):
+            running = bool(self.proxy and self.proxy.running)
+            self.tray_proxy_act.setText("Stop Proxy" if running else "Start Proxy")
+            self.tray_tun_act.setText("TUN Mode: ON" if self.tun_active else "TUN Mode: OFF")
+
 
 def main():
     enable_windows_dpi_awareness()
     app = QApplication(sys.argv)
     app.setStyle("Fusion")
     app.setStyleSheet(PRO_QSS)
+    ico = _resource_path("freednet.ico")
+    if os.path.exists(ico):
+        app.setWindowIcon(QIcon(ico))
     win = FreeDnetProWindow()
     win.show()
     sys.exit(app.exec())
