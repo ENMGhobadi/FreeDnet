@@ -5,9 +5,7 @@
 AppId={{8F4E2C1A-9B3D-4E7F-A123-456789FREEDN}
 AppName=FreeDnet Pro
 AppVersion=2.0.0
-AppPublisher=ENMGhobadi
-AppPublisherURL=https://github.com/ENMGhobadi/FreeDnet
-AppSupportURL=https://github.com/ENMGhobadi/FreeDnet
+AppPublisher=FreeDnet
 DefaultDirName={localappdata}\Programs\FreeDnet
 DefaultGroupName=FreeDnet Pro
 PrivilegesRequired=lowest
