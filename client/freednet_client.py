@@ -686,6 +686,9 @@ class FreeDnetProWindow(QMainWindow):
         self.lbl_full_log = QLabel("Full Activity Log", objectName="FieldLabel")
         log_hdr.addWidget(self.lbl_full_log)
         log_hdr.addStretch()
+        self.log_console = QTextEdit(objectName="LogConsole")
+        self.log_console.setReadOnly(True)
+
         self.cpy_btn = QPushButton("Copy Logs", objectName="SmallBtn")
         cpy_btn = self.cpy_btn
         cpy_btn.clicked.connect(lambda: QApplication.clipboard().setText(self.log_console.toPlainText()))
@@ -695,9 +698,6 @@ class FreeDnetProWindow(QMainWindow):
         log_hdr.addWidget(cpy_btn)
         log_hdr.addWidget(clr_btn)
         set_lay.addLayout(log_hdr)
-
-        self.log_console = QTextEdit(objectName="LogConsole")
-        self.log_console.setReadOnly(True)
         set_lay.addWidget(self.log_console, stretch=1)
         self.tabs.addTab(set_tab, "Settings & Logs")
 
