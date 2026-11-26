@@ -38,12 +38,29 @@ echo [2/4] Setting up virtual environment (.venv) and installing PySide6...
 if not exist ".venv\Scripts\python.exe" (
     python -m venv .venv
 )
-".venv\Scripts\python.exe" -m pip install --upgrade pip >nul 2>&1
-".venv\Scripts\pip.exe" install -r requirements.txt
+".venv\Scripts\python.exe" -c "import PySide6" >nul 2>&1
 if errorlevel 1 (
-    echo ERROR: Failed to install Python dependencies.
-    pause
-    exit /b 1
+    ".venv\Scripts\python.exe" -m pip install --upgrade pip >nul 2>&1
+    ".venv\Scripts\pip.exe" install -r requirements.txt
+    if errorlevel 1 (
+        echo Pip failed ^(possible dead Windows/env proxy^). Retrying without proxy...
+        set "HTTP_PROXY="
+        set "HTTPS_PROXY="
+        set "ALL_PROXY="
+        set "http_proxy="
+        set "https_proxy="
+        set "all_proxy="
+        set "NO_PROXY=*"
+        set "no_proxy=*"
+        ".venv\Scripts\pip.exe" install --no-cache-dir -r requirements.txt
+        if errorlevel 1 (
+            echo ERROR: Failed to install Python dependencies.
+            pause
+            exit /b 1
+        )
+    )
+) else (
+    echo       PySide6 already installed.
 )
 
 REM 3. Download Xray-core Windows x64 & Wintun driver for TUN Mode

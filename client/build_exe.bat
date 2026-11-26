@@ -1,20 +1,76 @@
 @echo off
+setlocal
 title Build FreeDnet.exe (Windows x64)
 cd /d "%~dp0"
 
 echo Building standalone FreeDnet.exe with PyInstaller...
-python make_icon.py
-python -m pip install --upgrade pip >nul 2>&1
-python -m pip install -r requirements.txt pyinstaller
+
+set "PY=python"
+if exist ".venv\Scripts\python.exe" (
+    set "PY=.venv\Scripts\python.exe"
+)
+
+"%PY%" make_icon.py
+
+"%PY%" -c "import PySide6, PyInstaller" >nul 2>&1
+if not errorlevel 1 (
+    echo PySide6 and PyInstaller already installed. Skipping download.
+    goto :build
+)
+
+"%PY%" -m pip install -r requirements.txt pyinstaller
 if errorlevel 1 (
-    echo ERROR: Failed to install PyInstaller / PySide6.
+    echo.
+    echo Pip failed ^(possible dead Windows/env proxy^). Retrying without proxy...
+    set "HTTP_PROXY="
+    set "HTTPS_PROXY="
+    set "ALL_PROXY="
+    set "http_proxy="
+    set "https_proxy="
+    set "all_proxy="
+    set "NO_PROXY=*"
+    set "no_proxy=*"
+    "%PY%" -m pip install --no-cache-dir -r requirements.txt pyinstaller
+    if errorlevel 1 (
+        echo ERROR: Failed to install PyInstaller / PySide6.
+        echo Tip: Turn off Windows System Proxy ^(Settings ^> Network ^> Proxy^) or turn on your VPN/FreeDnet proxy and try again.
+        pause
+        exit /b 1
+    )
+)
+
+:build
+if exist "build" rmdir /s /q "build"
+if exist "FreeDnet.spec" del /q "FreeDnet.spec"
+if exist "dist\FreeDnet.exe" del /q "dist\FreeDnet.exe"
+
+"%PY%" -m PyInstaller --noconfirm --clean --onefile --windowed --icon=freednet.ico --name FreeDnet ^
+  --exclude-module PySide6.QtWebEngineCore ^
+  --exclude-module PySide6.QtWebEngineWidgets ^
+  --exclude-module PySide6.QtWebEngineQuick ^
+  --exclude-module PySide6.QtPdf ^
+  --exclude-module PySide6.QtPdfWidgets ^
+  --exclude-module PySide6.QtQml ^
+  --exclude-module PySide6.QtQuick ^
+  --exclude-module PySide6.Qt3DCore ^
+  --exclude-module PySide6.Qt3DRender ^
+  --exclude-module PySide6.QtMultimedia ^
+  --exclude-module PySide6.QtSql ^
+  --exclude-module PySide6.QtTest ^
+  freednet_client.py
+
+if errorlevel 1 (
+    echo ERROR: Build failed.
     pause
     exit /b 1
 )
 
-python -m PyInstaller --noconfirm --onefile --windowed --icon=freednet.ico --name FreeDnet freednet_client.py
-if errorlevel 1 (
-    echo ERROR: Build failed.
+if not exist "dist\FreeDnet.exe" (
+    echo.
+    echo ERROR: PyInstaller finished, but dist\FreeDnet.exe is MISSING!
+    echo Windows Defender or your Antivirus almost certainly quarantined it.
+    echo Fix: Open Windows Security ^> Virus ^& threat protection ^> Protection history,
+    echo      or add "%cd%\dist" to Exclusions and run build_exe.bat again.
     pause
     exit /b 1
 )
@@ -22,4 +78,5 @@ if errorlevel 1 (
 echo.
 echo Success! Your standalone executable is ready at:
 echo   %cd%\dist\FreeDnet.exe
+for %%A in ("dist\FreeDnet.exe") do echo   Size: %%~zA bytes
 pause
