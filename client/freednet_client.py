@@ -1,6 +1,10 @@
 #!/usr/bin/env python3
 """
-FreeDnet Local Client (Windows 11 Modern GUI + SOCKS5/HTTP Proxy + Direct / Multi-GAS & Priority Multi-Server Failover)
+FreeDnet Local Client (Windows 11 Modern GUI + SOCKS5/HTTP Proxy)
+- GAS Quota Presets (Low / Medium / High / X-High for free Gmail accounts)
+- GAS Distribution Mode: Fair-Share (1/N) OR Priority (#1 -> #2)
+- Backend Distribution Mode: Priority (#1 -> #2), Fair-Share (1/N), OR Only: <Server>
+- Smart Keep-Awake (10m): keeps #1 awake in Priority/Only mode, or ALL enabled servers in Fair-Share mode
 Uses only Python 3.8+ standard library.
 """
 
@@ -30,16 +34,25 @@ except ImportError:
     simpledialog = None
 
 CONFIG_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "config.json")
+
+# Free Gmail Google Apps Script limits: 30 concurrent, 20,000 UrlFetch/day
+GAS_QUOTA_PRESETS = {
+    "Low (Safe: 10 conc | 8k/day | 60 rpm)": (10, 8000, 60),
+    "Medium (Balanced: 18 conc | 14k/day | 120 rpm)": (18, 14000, 120),
+    "High (Fast: 24 conc | 18k/day | 180 rpm)": (24, 18000, 180),
+    "X-High (Max Free: 28 conc | 19.5k/day | 240 rpm)": (28, 19500, 240),
+}
+DEFAULT_PRESET = "Medium (Balanced: 18 conc | 14k/day | 120 rpm)"
+
 DEFAULT_CONFIG = {
     "auth_key": "change-me-freednet-key",
     "listen_host": "127.0.0.1",
     "listen_port": 1080,
-    "route_mode": "gas",  # "gas" or "direct"
-    "selected_server": "auto",  # "auto" (Priority + Failover) or specific server name
+    "route_mode": "gas",       # "gas" or "direct"
+    "gas_mode": "fair",        # "fair" (1/N) or "priority" (#1 -> #2)
+    "server_mode": "priority", # "priority" (#1 -> #2), "fair" (1/N), or "only:<name>"
+    "quota_preset": DEFAULT_PRESET,
     "keep_awake": True,
-    "max_concurrent_per_account": 20,
-    "daily_limit_per_account": 18000,
-    "max_rpm_per_account": 120,
     "accounts": [],
     "servers": [],
 }
@@ -61,15 +74,6 @@ def normalize_tunnel_url(raw_url: str) -> str:
     if not trimmed:
         return ""
     return trimmed if trimmed.endswith("/tunnel") else f"{trimmed}/tunnel"
-
-
-def normalize_health_url(raw_url: str) -> str:
-    trimmed = raw_url.strip().rstrip("/")
-    if not trimmed:
-        return ""
-    if trimmed.endswith("/tunnel"):
-        trimmed = trimmed[:-7]
-    return f"{trimmed}/health"
 
 
 class BackendServer:
@@ -102,18 +106,19 @@ class BackendServer:
 
 class ServerPool:
     """
-    Manages multiple backend servers (Render / SnappDeploy / Oracle) in strict Priority order (#1, #2, #3...).
-    Supports:
-      - Auto mode ("auto"): tries Priority #1 first; fails over to #2, #3 if #1 is down/in cooldown.
-      - Pinned mode ("<Server Name>"): routes strictly to the user-selected server only.
+    Manages multiple backend servers (Render / SnappDeploy / Oracle).
+    Modes:
+      - "priority": tries #1 first; fails over to #2, #3 if #1 is down/in cooldown.
+      - "fair": distributes load evenly (1/N) across all healthy enabled servers.
+      - "only:<name>": routes strictly to the specified server.
     """
 
     def __init__(self):
         self.lock = threading.Lock()
         self.servers: list[BackendServer] = []
-        self.selected_server: str = "auto"
+        self.server_mode: str = "priority"
 
-    def load_servers(self, items: list[dict], selected_server: str = "auto"):
+    def load_servers(self, items: list[dict], server_mode: str = "priority"):
         with self.lock:
             self.servers = [
                 BackendServer(
@@ -124,11 +129,11 @@ class ServerPool:
                 for i, item in enumerate(items)
                 if item.get("url", "").strip()
             ]
-            self.selected_server = selected_server or "auto"
+            self.server_mode = server_mode or "priority"
 
-    def set_selected_server(self, selected: str):
+    def set_mode(self, mode: str):
         with self.lock:
-            self.selected_server = selected or "auto"
+            self.server_mode = mode or "priority"
 
     def get_candidates(self, require_explicit: bool = False) -> list[BackendServer | None]:
         with self.lock:
@@ -137,14 +142,31 @@ class ServerPool:
             if not enabled:
                 return [] if require_explicit else [None]
 
-            if self.selected_server != "auto":
-                pinned = [s for s in enabled if s.name == self.selected_server]
+            if self.server_mode.startswith("only:"):
+                target_name = self.server_mode[5:]
+                pinned = [s for s in enabled if s.name == target_name]
                 if pinned:
                     return pinned
 
             healthy = [s for s in enabled if now >= s.cooldown_until]
             cooldown = sorted([s for s in enabled if now < s.cooldown_until], key=lambda s: s.cooldown_until)
+
+            if self.server_mode == "fair":
+                healthy.sort(key=lambda s: (s.consecutive_failures, s.total_requests))
             return healthy + cooldown
+
+    def get_keep_awake_targets(self, require_explicit: bool = False) -> list[BackendServer]:
+        with self.lock:
+            enabled = [s for s in self.servers if s.enabled and s.url]
+            if not enabled:
+                return []
+            if self.server_mode == "fair":
+                return list(enabled)
+            if self.server_mode.startswith("only:"):
+                target_name = self.server_mode[5:]
+                pinned = [s for s in enabled if s.name == target_name]
+                return pinned if pinned else [enabled[0]]
+            return [enabled[0]]
 
     def report_success(self, srv: BackendServer | None, latency_ms: int):
         if srv is None:
@@ -234,21 +256,27 @@ class GasAccount:
 
 class GasAccountPool:
     """
-    Long-session, quota-preserving scheduler across 1..N Google Apps Script accounts.
+    Scheduler across 1..N Google Apps Script accounts.
+    Modes:
+      - "fair": Equalizes (active, daily_requests, recent_rpm) across all accounts (1/N).
+      - "priority": Sticks to #1 until it hits concurrent/RPM/daily limit or cooldown, then falls back to #2, #3...
     """
 
-    def __init__(self, max_concurrent: int = 20, daily_limit: int = 18000, max_rpm: int = 120):
+    def __init__(self, max_concurrent: int = 18, daily_limit: int = 14000, max_rpm: int = 120, gas_mode: str = "fair"):
         self.lock = threading.Condition()
         self.accounts: list[GasAccount] = []
         self.max_concurrent = max(1, min(int(max_concurrent), 28))
         self.daily_limit = max(100, int(daily_limit))
         self.max_rpm = max(10, int(max_rpm))
+        self.gas_mode = gas_mode  # "fair" or "priority"
 
-    def update_limits(self, max_concurrent: int, daily_limit: int, max_rpm: int):
+    def update_limits(self, max_concurrent: int, daily_limit: int, max_rpm: int, gas_mode: str | None = None):
         with self.lock:
             self.max_concurrent = max(1, min(int(max_concurrent), 28))
             self.daily_limit = max(100, int(daily_limit))
             self.max_rpm = max(10, int(max_rpm))
+            if gas_mode in ("fair", "priority"):
+                self.gas_mode = gas_mode
             self.lock.notify_all()
 
     def load_accounts(self, items: list[dict]):
@@ -288,10 +316,13 @@ class GasAccountPool:
                     and len(acc.rpm_timestamps) < self.max_rpm
                 ]
                 if candidates:
-                    chosen = min(
-                        candidates,
-                        key=lambda a: (a.active, a.daily_requests, len(a.rpm_timestamps), a.total_requests),
-                    )
+                    if self.gas_mode == "priority":
+                        chosen = candidates[0]
+                    else:
+                        chosen = min(
+                            candidates,
+                            key=lambda a: (a.active, a.daily_requests, len(a.rpm_timestamps), a.total_requests),
+                        )
                     chosen.active += 1
                     chosen.total_requests += 1
                     chosen.daily_requests += 1
@@ -457,9 +488,8 @@ class FreeDnetProxyServer:
         self.running = True
         threading.Thread(target=self._accept_loop, daemon=True).start()
         threading.Thread(target=self._keep_awake_loop, daemon=True).start()
-        mode_lbl = "Direct -> Backend" if self.route_mode == "direct" else "Via Google Apps Script"
-        target_lbl = self.server_pool.selected_server
-        self.log(f"Proxy listening on {self.host}:{self.port} [{mode_lbl} | Target: {target_lbl}]")
+        mode_lbl = "Direct" if self.route_mode == "direct" else f"GAS:{self.pool.gas_mode}"
+        self.log(f"Proxy listening on {self.host}:{self.port} [{mode_lbl} | Backend: {self.server_pool.server_mode}]")
 
     def stop(self):
         self.running = False
@@ -553,7 +583,11 @@ class FreeDnetProxyServer:
         return last_res, None
 
     def _keep_awake_loop(self):
-        """Pings only the Priority #1 backend server every 10 minutes so it never sleeps."""
+        """
+        Every 10 minutes:
+        - In Priority / Only mode: pings ONLY the #1 (or pinned) backend server.
+        - In Fair-Share (1/N) mode: pings ALL enabled backend servers so none sleep.
+        """
         interval = 600
         elapsed = 0
         while self.running:
@@ -567,17 +601,17 @@ class FreeDnetProxyServer:
             if not self.keep_awake:
                 continue
             try:
-                cands = self.server_pool.get_candidates(require_explicit=(self.route_mode == "direct"))
-                top = cands[0] if cands else None
-                if top is None:
-                    continue
-                t0 = time.time()
-                res = self._send_request("ping", {}, backend=top, retries=0)
-                lat = int((time.time() - t0) * 1000)
-                if res.get("ok"):
-                    self.log(f"Keep-Awake OK [{top.name}]: {lat} ms")
-                else:
-                    self.log(f"Keep-Awake FAILED [{top.name}]: {res.get('error')}")
+                targets = self.server_pool.get_keep_awake_targets(require_explicit=(self.route_mode == "direct"))
+                for srv in targets:
+                    if not self.running:
+                        break
+                    t0 = time.time()
+                    res = self._send_request("ping", {}, backend=srv, retries=0)
+                    lat = int((time.time() - t0) * 1000)
+                    if res.get("ok"):
+                        self.log(f"Keep-Awake OK [{srv.name}]: {lat} ms")
+                    else:
+                        self.log(f"Keep-Awake FAILED [{srv.name}]: {res.get('error')}")
             except Exception:
                 pass
 
@@ -892,26 +926,33 @@ if HAS_TK:
         GREEN = "#16a34a"
         RED = "#dc2626"
 
-        AUTO_LABEL = "Auto (Priority + Failover)"
+        SRV_PRIORITY_LBL = "Auto: Priority (#1 -> #2 Failover)"
+        SRV_FAIR_LBL = "Auto: Fair-Share (1/N Equal)"
 
         def __init__(self, root: tk.Tk):
             self.root = root
-            self.root.title("FreeDnet Client — Direct / Multi-GAS & Priority Multi-Server Failover")
-            self.root.geometry("1020x760")
-            self.root.minsize(900, 650)
+            self.root.title("FreeDnet Client — Multi-GAS & Multi-Server Smart Router")
+            self.root.geometry("1040x770")
+            self.root.minsize(920, 660)
             self.root.configure(bg=self.BG)
 
             self.config = self._load_config()
+            preset = self.config.get("quota_preset", DEFAULT_PRESET)
+            if preset not in GAS_QUOTA_PRESETS:
+                preset = DEFAULT_PRESET
+            conc, daily, rpm = GAS_QUOTA_PRESETS[preset]
+
             self.pool = GasAccountPool(
-                max_concurrent=self.config.get("max_concurrent_per_account", 20),
-                daily_limit=self.config.get("daily_limit_per_account", 18000),
-                max_rpm=self.config.get("max_rpm_per_account", 120),
+                max_concurrent=conc,
+                daily_limit=daily,
+                max_rpm=rpm,
+                gas_mode=self.config.get("gas_mode", "fair"),
             )
             self.pool.load_accounts(self.config.get("accounts", []))
             self.server_pool = ServerPool()
             self.server_pool.load_servers(
                 self.config.get("servers", []),
-                selected_server=self.config.get("selected_server", "auto"),
+                server_mode=self.config.get("server_mode", "priority"),
             )
             self.proxy = None
             self.log_queue = queue.Queue()
@@ -956,24 +997,14 @@ if HAS_TK:
             self.config["auth_key"] = self.auth_var.get().strip()
             self.config["listen_host"] = self.host_var.get().strip() or "127.0.0.1"
             self.config["route_mode"] = self.route_var.get()
-            self.config["selected_server"] = self.server_pool.selected_server
+            self.config["gas_mode"] = self.gas_mode_var.get()
+            self.config["server_mode"] = self.server_pool.server_mode
+            self.config["quota_preset"] = self.preset_var.get()
             self.config["keep_awake"] = bool(self.keep_awake_var.get())
             try:
                 self.config["listen_port"] = int(self.port_var.get().strip())
             except ValueError:
                 self.config["listen_port"] = 1080
-            try:
-                self.config["max_concurrent_per_account"] = int(self.max_conc_var.get().strip())
-            except ValueError:
-                self.config["max_concurrent_per_account"] = 20
-            try:
-                self.config["daily_limit_per_account"] = int(self.daily_limit_var.get().strip())
-            except ValueError:
-                self.config["daily_limit_per_account"] = 18000
-            try:
-                self.config["max_rpm_per_account"] = int(self.max_rpm_var.get().strip())
-            except ValueError:
-                self.config["max_rpm_per_account"] = 120
             self.config["accounts"] = [acc.to_dict() for acc in self.pool.accounts]
             self.config["servers"] = [srv.to_dict() for srv in self.server_pool.servers]
             with open(CONFIG_PATH, "w", encoding="utf-8") as f:
@@ -1019,7 +1050,7 @@ if HAS_TK:
             tk.Label(title_box, text="FreeDnet", font=("Segoe UI", 14, "bold"), fg="#ffffff", bg="#0f172a").pack(side="left")
             tk.Label(
                 title_box,
-                text="  Direct / Multi-GAS + Priority Multi-Server",
+                text="  Multi-GAS & Multi-Server Smart Router",
                 font=("Segoe UI", 9),
                 fg="#94a3b8",
                 bg="#0f172a",
@@ -1043,49 +1074,72 @@ if HAS_TK:
             main = ttk.Frame(self.root)
             main.pack(fill="both", expand=True, padx=14, pady=12)
 
-            # Card 1: Settings & Chain Mode
+            # Card 1: Settings, Routing & Quota Presets
             cfg_card = tk.Frame(main, bg=self.CARD, highlightbackground=self.BORDER, highlightthickness=1, padx=12, pady=10)
             cfg_card.pack(fill="x", pady=(0, 10))
 
-            ttk.Label(cfg_card, text="Connection, Chain Mode & Backend Target", style="Section.TLabel").grid(
+            ttk.Label(cfg_card, text="Routing, Quota Profile & Connection Settings", style="Section.TLabel").grid(
                 row=0, column=0, columnspan=8, sticky="w", pady=(0, 8)
             )
 
-            # Row 1: Route Mode + Backend Target Selector
+            # Row 1: Chain Mode + Backend Mode
             ttk.Label(cfg_card, text="Chain Mode:", style="Card.TLabel").grid(row=1, column=0, sticky="w", padx=(0, 6), pady=4)
             self.route_var = tk.StringVar(value=self.config.get("route_mode", "gas"))
             mode_frame = tk.Frame(cfg_card, bg=self.CARD)
             mode_frame.grid(row=1, column=1, columnspan=3, sticky="w", pady=4)
             ttk.Radiobutton(
-                mode_frame,
-                text="Via Google Apps Script",
-                variable=self.route_var,
-                value="gas",
-                command=self._on_route_change,
+                mode_frame, text="Via Google Apps Script", variable=self.route_var, value="gas", command=self._on_route_change
             ).pack(side="left", padx=(0, 12))
             ttk.Radiobutton(
-                mode_frame,
-                text="Direct to Backend",
-                variable=self.route_var,
-                value="direct",
-                command=self._on_route_change,
+                mode_frame, text="Direct to Backend", variable=self.route_var, value="direct", command=self._on_route_change
             ).pack(side="left")
 
-            ttk.Label(cfg_card, text="Backend Target:", style="Card.TLabel").grid(row=1, column=4, sticky="w", padx=(12, 4))
-            self.target_var = tk.StringVar(value=self.AUTO_LABEL)
-            self.target_combo = ttk.Combobox(cfg_card, textvariable=self.target_var, state="readonly", width=28)
+            ttk.Label(cfg_card, text="Backend Mode:", style="Card.TLabel").grid(row=1, column=4, sticky="w", padx=(12, 4))
+            self.target_var = tk.StringVar(value=self.SRV_PRIORITY_LBL)
+            self.target_combo = ttk.Combobox(cfg_card, textvariable=self.target_var, state="readonly", width=32)
             self.target_combo.grid(row=1, column=5, columnspan=3, sticky="w", padx=4)
             self.target_combo.bind("<<ComboboxSelected>>", self._on_target_change)
 
-            # Row 2: Auth, Listen & Keep Awake
-            ttk.Label(cfg_card, text="Auth Key:", style="Card.TLabel").grid(row=2, column=0, sticky="w", padx=(0, 6), pady=4)
+            # Row 2: GAS Distribution Mode + GAS Quota Preset
+            ttk.Label(cfg_card, text="GAS Mode:", style="Card.TLabel").grid(row=2, column=0, sticky="w", padx=(0, 6), pady=4)
+            self.gas_mode_var = tk.StringVar(value=self.config.get("gas_mode", "fair"))
+            gas_mode_frame = tk.Frame(cfg_card, bg=self.CARD)
+            gas_mode_frame.grid(row=2, column=1, columnspan=3, sticky="w", pady=4)
+            ttk.Radiobutton(
+                gas_mode_frame,
+                text="Fair-Share (1/N Equal)",
+                variable=self.gas_mode_var,
+                value="fair",
+                command=self._on_gas_mode_change,
+            ).pack(side="left", padx=(0, 12))
+            ttk.Radiobutton(
+                gas_mode_frame,
+                text="Priority (#1 -> #2 Failover)",
+                variable=self.gas_mode_var,
+                value="priority",
+                command=self._on_gas_mode_change,
+            ).pack(side="left")
+
+            ttk.Label(cfg_card, text="GAS Quota (Free):", style="Card.TLabel").grid(row=2, column=4, sticky="w", padx=(12, 4))
+            init_preset = self.config.get("quota_preset", DEFAULT_PRESET)
+            if init_preset not in GAS_QUOTA_PRESETS:
+                init_preset = DEFAULT_PRESET
+            self.preset_var = tk.StringVar(value=init_preset)
+            self.preset_combo = ttk.Combobox(
+                cfg_card, textvariable=self.preset_var, values=list(GAS_QUOTA_PRESETS.keys()), state="readonly", width=36
+            )
+            self.preset_combo.grid(row=2, column=5, columnspan=3, sticky="w", padx=4)
+            self.preset_combo.bind("<<ComboboxSelected>>", self._on_preset_change)
+
+            # Row 3: Auth, Listen IP, Port, Keep-Awake
+            ttk.Label(cfg_card, text="Auth Key:", style="Card.TLabel").grid(row=3, column=0, sticky="w", padx=(0, 6), pady=4)
             self.auth_var = tk.StringVar(value=self.config["auth_key"])
             self.auth_entry = ttk.Entry(cfg_card, textvariable=self.auth_var, show="*", width=26)
-            self.auth_entry.grid(row=2, column=1, sticky="w", padx=4, pady=4)
+            self.auth_entry.grid(row=3, column=1, sticky="w", padx=4, pady=4)
             bind_universal_clipboard(self.auth_entry)
 
             auth_act = tk.Frame(cfg_card, bg=self.CARD)
-            auth_act.grid(row=2, column=2, sticky="w", padx=4)
+            auth_act.grid(row=3, column=2, sticky="w", padx=4)
             self.show_key_var = tk.BooleanVar(value=False)
             ttk.Checkbutton(auth_act, text="Show", variable=self.show_key_var, command=self._toggle_key).pack(side="left")
             tk.Button(
@@ -1094,38 +1148,21 @@ if HAS_TK:
                 font=("Segoe UI", 8), cursor="hand2"
             ).pack(side="left", padx=(4, 0))
 
-            ttk.Label(cfg_card, text="Listen IP:", style="Card.TLabel").grid(row=2, column=3, sticky="w", padx=(12, 4))
+            ttk.Label(cfg_card, text="Listen IP:", style="Card.TLabel").grid(row=3, column=3, sticky="w", padx=(12, 4))
             self.host_var = tk.StringVar(value=self.config["listen_host"])
-            ttk.Entry(cfg_card, textvariable=self.host_var, width=14).grid(row=2, column=4, sticky="w", padx=4)
+            ttk.Entry(cfg_card, textvariable=self.host_var, width=14).grid(row=3, column=4, sticky="w", padx=4)
 
-            ttk.Label(cfg_card, text="Port:", style="Card.TLabel").grid(row=2, column=5, sticky="w", padx=(10, 4))
+            ttk.Label(cfg_card, text="Port:", style="Card.TLabel").grid(row=3, column=5, sticky="w", padx=(10, 4))
             self.port_var = tk.StringVar(value=str(self.config["listen_port"]))
-            ttk.Entry(cfg_card, textvariable=self.port_var, width=7).grid(row=2, column=6, sticky="w", padx=4)
+            ttk.Entry(cfg_card, textvariable=self.port_var, width=7).grid(row=3, column=6, sticky="w", padx=4)
 
             self.keep_awake_var = tk.BooleanVar(value=bool(self.config.get("keep_awake", True)))
             ttk.Checkbutton(
                 cfg_card,
-                text="Keep #1 Awake (10m)",
+                text="Keep Awake (10m)",
                 variable=self.keep_awake_var,
                 command=self._on_keep_awake_change,
-            ).grid(row=2, column=7, sticky="w", padx=6)
-
-            # Row 3: GAS Quota Limits
-            ttk.Label(cfg_card, text="Max Concurrent:", style="Card.TLabel").grid(row=3, column=0, sticky="w", padx=(0, 6), pady=4)
-            self.max_conc_var = tk.StringVar(value=str(self.config["max_concurrent_per_account"]))
-            ttk.Entry(cfg_card, textvariable=self.max_conc_var, width=8).grid(row=3, column=1, sticky="w", padx=4, pady=4)
-
-            ttk.Label(cfg_card, text="Daily Limit / Acc:", style="Card.TLabel").grid(row=3, column=2, sticky="w", padx=(6, 4))
-            self.daily_limit_var = tk.StringVar(value=str(self.config["daily_limit_per_account"]))
-            ttk.Entry(cfg_card, textvariable=self.daily_limit_var, width=9).grid(row=3, column=3, sticky="w", padx=4)
-
-            ttk.Label(cfg_card, text="Max Req/Min:", style="Card.TLabel").grid(row=3, column=4, sticky="w", padx=(10, 4))
-            self.max_rpm_var = tk.StringVar(value=str(self.config["max_rpm_per_account"]))
-            ttk.Entry(cfg_card, textvariable=self.max_rpm_var, width=7).grid(row=3, column=5, sticky="w", padx=4)
-
-            ttk.Label(cfg_card, text="(Safe: 20 conc, 18k/day, 120 rpm)", style="Muted.TLabel").grid(
-                row=3, column=6, columnspan=2, sticky="w", padx=6
-            )
+            ).grid(row=3, column=7, sticky="w", padx=6)
 
             # Card 2: Tabbed Pools
             pool_card = tk.Frame(main, bg=self.CARD, highlightbackground=self.BORDER, highlightthickness=1, padx=12, pady=10)
@@ -1139,22 +1176,23 @@ if HAS_TK:
             self.notebook = ttk.Notebook(pool_card)
             self.notebook.pack(fill="both", expand=True)
 
-            # Tab 1: GAS Accounts
+            # Tab 1: GAS Accounts (with Priority Up/Down)
             gas_tab = tk.Frame(self.notebook, bg=self.CARD, pady=6)
             self.notebook.add(gas_tab, text="Google Apps Script Accounts")
 
             gas_wrap = tk.Frame(gas_tab, bg=self.CARD)
             gas_wrap.pack(fill="both", expand=True)
-            cols = ("name", "status", "active", "daily", "share", "latency", "url")
+            cols = ("prio", "name", "status", "active", "daily", "share", "latency", "url")
             self.tree = ttk.Treeview(gas_wrap, columns=cols, show="headings", height=6)
             for col, text, w in [
+                ("prio", "Priority", 60),
                 ("name", "Account", 105),
-                ("status", "Status", 100),
-                ("active", "Active", 65),
-                ("daily", "Daily Quota", 110),
-                ("share", "Session %", 75),
-                ("latency", "Latency", 75),
-                ("url", "GAS Web App URL", 300),
+                ("status", "Status", 95),
+                ("active", "Active", 60),
+                ("daily", "Daily Quota", 105),
+                ("share", "Session %", 70),
+                ("latency", "Latency", 70),
+                ("url", "GAS Web App URL", 290),
             ]:
                 self.tree.heading(col, text=text)
                 self.tree.column(col, width=w, anchor="w" if col in ("name", "url") else "center")
@@ -1168,11 +1206,13 @@ if HAS_TK:
             self._make_btn(gas_btns, "+ Add GAS Account", self.add_account, primary=True).pack(side="left", padx=(0, 6))
             self._make_btn(gas_btns, "Edit", self.edit_account).pack(side="left", padx=4)
             self._make_btn(gas_btns, "Enable / Disable", self.toggle_account).pack(side="left", padx=4)
+            self._make_btn(gas_btns, "▲ Up", lambda: self.move_account(-1)).pack(side="left", padx=4)
+            self._make_btn(gas_btns, "▼ Down", lambda: self.move_account(1)).pack(side="left", padx=4)
             self._make_btn(gas_btns, "Remove", self.remove_account).pack(side="left", padx=4)
 
-            # Tab 2: Backend Servers with Priority
+            # Tab 2: Backend Servers
             srv_tab = tk.Frame(self.notebook, bg=self.CARD, pady=6)
-            self.notebook.add(srv_tab, text="Backend Servers (Priority & Failover)")
+            self.notebook.add(srv_tab, text="Backend Servers (Render / SnappDeploy / Oracle)")
 
             srv_wrap = tk.Frame(srv_tab, bg=self.CARD)
             srv_wrap.pack(fill="both", expand=True)
@@ -1180,7 +1220,7 @@ if HAS_TK:
             self.srv_tree = ttk.Treeview(srv_wrap, columns=scols, show="headings", height=6)
             for col, text, w in [
                 ("prio", "Priority", 65),
-                ("name", "Server Name", 140),
+                ("name", "Server Name", 150),
                 ("status", "Status", 100),
                 ("requests", "Requests", 80),
                 ("errors", "Errors", 65),
@@ -1212,7 +1252,7 @@ if HAS_TK:
             ttk.Label(log_hdr, text="Activity Log", style="Section.TLabel").pack(side="left")
             ttk.Label(
                 log_hdr,
-                text="Keep #1 Awake pings Priority #1 every 10m while proxy is running.",
+                text="Free Gmail GAS limit: 30 concurrent / 20k per day. Keep-Awake keeps #1 (or all in Fair-Share) awake.",
                 style="Muted.TLabel",
             ).pack(side="right")
 
@@ -1243,34 +1283,53 @@ if HAS_TK:
                 messagebox.showwarning("Clipboard Empty", "Nothing to paste from clipboard.")
 
         def _refresh_target_dropdown(self):
-            options = [self.AUTO_LABEL] + [f"Only: {s.name}" for s in self.server_pool.servers]
+            options = [self.SRV_PRIORITY_LBL, self.SRV_FAIR_LBL] + [f"Only: {s.name}" for s in self.server_pool.servers]
             self.target_combo["values"] = options
-            sel = self.server_pool.selected_server
-            if sel == "auto":
-                self.target_var.set(self.AUTO_LABEL)
-            else:
-                lbl = f"Only: {sel}"
+            mode = self.server_pool.server_mode
+            if mode == "fair":
+                self.target_var.set(self.SRV_FAIR_LBL)
+            elif mode.startswith("only:"):
+                lbl = f"Only: {mode[5:]}"
                 if lbl in options:
                     self.target_var.set(lbl)
                 else:
-                    self.server_pool.set_selected_server("auto")
-                    self.target_var.set(self.AUTO_LABEL)
+                    self.server_pool.set_mode("priority")
+                    self.target_var.set(self.SRV_PRIORITY_LBL)
+            else:
+                self.server_pool.set_mode("priority")
+                self.target_var.set(self.SRV_PRIORITY_LBL)
 
         def _on_target_change(self, _event=None):
             val = self.target_var.get()
-            if val == self.AUTO_LABEL:
-                self.server_pool.set_selected_server("auto")
+            if val == self.SRV_PRIORITY_LBL:
+                self.server_pool.set_mode("priority")
+            elif val == self.SRV_FAIR_LBL:
+                self.server_pool.set_mode("fair")
             elif val.startswith("Only: "):
-                self.server_pool.set_selected_server(val[6:])
+                self.server_pool.set_mode(f"only:{val[6:]}")
             self._save_config()
-            self.log(f"Backend Target set to: {val}")
+            self.log(f"Backend Mode set to: {val}")
+
+        def _on_gas_mode_change(self):
+            gmode = self.gas_mode_var.get()
+            conc, daily, rpm = GAS_QUOTA_PRESETS.get(self.preset_var.get(), (18, 14000, 120))
+            self.pool.update_limits(conc, daily, rpm, gas_mode=gmode)
+            self._save_config()
+            self.log(f"GAS Distribution Mode set to: {gmode}")
+
+        def _on_preset_change(self, _event=None):
+            preset = self.preset_var.get()
+            conc, daily, rpm = GAS_QUOTA_PRESETS.get(preset, (18, 14000, 120))
+            self.pool.update_limits(conc, daily, rpm)
+            self._save_config()
+            self.log(f"GAS Quota Profile set to: {preset}")
 
         def _on_keep_awake_change(self):
             val = bool(self.keep_awake_var.get())
             self._save_config()
             if self.proxy and self.proxy.running:
                 self.proxy.keep_awake = val
-                self.log(f"Keep #1 Awake {'enabled' if val else 'disabled'}.")
+                self.log(f"Keep Awake {'enabled' if val else 'disabled'}.")
 
         def _on_route_change(self):
             mode = self.route_var.get()
@@ -1342,6 +1401,22 @@ if HAS_TK:
                 self._save_config()
                 self._sync_tables()
 
+        def move_account(self, delta: int):
+            sel = self.tree.selection()
+            if not sel:
+                return
+            idx = int(sel[0])
+            new_idx = idx + delta
+            with self.pool.lock:
+                if 0 <= idx < len(self.pool.accounts) and 0 <= new_idx < len(self.pool.accounts):
+                    accs = self.pool.accounts
+                    accs[idx], accs[new_idx] = accs[new_idx], accs[idx]
+                else:
+                    return
+            self._save_config()
+            self._sync_tables()
+            self.tree.selection_set(str(new_idx))
+
         # --- Backend Server Actions ---
         def add_server(self):
             dlg = EntryDialog(
@@ -1373,8 +1448,8 @@ if HAS_TK:
                 )
                 if dlg.result_data:
                     srv.name, srv.url = dlg.result_data[0], dlg.result_data[1].rstrip("/")
-                    if self.server_pool.selected_server == old_name:
-                        self.server_pool.set_selected_server(srv.name)
+                    if self.server_pool.server_mode == f"only:{old_name}":
+                        self.server_pool.set_mode(f"only:{srv.name}")
                     self._refresh_target_dropdown()
                     self._save_config()
                     self._sync_tables()
@@ -1555,11 +1630,8 @@ if HAS_TK:
                 return
 
             self._save_config()
-            self.pool.update_limits(
-                self.config["max_concurrent_per_account"],
-                self.config["daily_limit_per_account"],
-                self.config["max_rpm_per_account"],
-            )
+            conc, daily, rpm = GAS_QUOTA_PRESETS.get(self.preset_var.get(), (18, 14000, 120))
+            self.pool.update_limits(conc, daily, rpm, gas_mode=self.gas_mode_var.get())
             try:
                 self.proxy = FreeDnetProxyServer(
                     pool=self.pool,
@@ -1587,10 +1659,10 @@ if HAS_TK:
                 for row in existing:
                     self.tree.delete(row)
                 for idx, acc in enumerate(self.pool.accounts):
-                    self.tree.insert("", "end", iid=str(idx), values=self._gas_row(acc, total_reqs))
+                    self.tree.insert("", "end", iid=str(idx), values=self._gas_row(idx, acc, total_reqs))
             else:
                 for idx, acc in enumerate(self.pool.accounts):
-                    self.tree.item(str(idx), values=self._gas_row(acc, total_reqs))
+                    self.tree.item(str(idx), values=self._gas_row(idx, acc, total_reqs))
 
             existing_s = list(self.srv_tree.get_children())
             if len(existing_s) != len(self.server_pool.servers):
@@ -1602,10 +1674,11 @@ if HAS_TK:
                 for idx, srv in enumerate(self.server_pool.servers):
                     self.srv_tree.item(str(idx), values=self._srv_row(idx, srv))
 
-        def _gas_row(self, acc: GasAccount, total_reqs: int):
+        def _gas_row(self, idx: int, acc: GasAccount, total_reqs: int):
             share = f"{(acc.total_requests / total_reqs * 100):.1f}%" if total_reqs > 0 else "0.0%"
             lat = f"{acc.last_latency_ms} ms" if acc.last_latency_ms > 0 else "-"
             return (
+                f"#{idx + 1}",
                 acc.name,
                 acc.status_label(self.pool.daily_limit),
                 f"{acc.active}/{self.pool.max_concurrent}",
