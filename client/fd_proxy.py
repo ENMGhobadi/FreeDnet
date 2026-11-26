@@ -131,6 +131,27 @@ class CertManager:
             self._ca_key = key
             return self.ca_cert_path
 
+    def _prune_host_certs(self, max_pairs: int = 150):
+        try:
+            entries = []
+            for fn in os.listdir(self.hosts_dir):
+                if fn.endswith(".crt"):
+                    p = os.path.join(self.hosts_dir, fn)
+                    try:
+                        entries.append((os.path.getmtime(p), p, p[:-4] + ".key"))
+                    except OSError:
+                        pass
+            if len(entries) > max_pairs:
+                entries.sort(key=lambda x: x[0])
+                for _, crt_p, key_p in entries[: len(entries) - max_pairs]:
+                    for target_p in (crt_p, key_p):
+                        try:
+                            os.remove(target_p)
+                        except OSError:
+                            pass
+        except Exception:
+            pass
+
     def get_ssl_context(self, host: str) -> ssl.SSLContext:
         clean_host = host.strip().lower().strip("[]")
         with self._lock:
@@ -183,6 +204,7 @@ class CertManager:
                     )
                 with open(cert_file, "wb") as f:
                     f.write(leaf_cert.public_bytes(serialization.Encoding.PEM))
+                self._prune_host_certs(max_pairs=150)
 
             ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
             ctx.load_cert_chain(certfile=cert_file, keyfile=key_file)
@@ -531,8 +553,18 @@ class FreeDnetProxyServer:
             if not keep_alive:
                 return
 
-    def _open_with_failover(self, host: str, port: int, init_b64: str) -> tuple[dict, BackendServer | None]:
-        candidates = self.server_pool.get_candidates(require_explicit=(self.route_mode == "direct"))
+    def _open_with_failover(
+        self, host: str, port: int, init_b64: str, preferred_server: str = ""
+    ) -> tuple[dict, BackendServer | None]:
+        candidates = []
+        if preferred_server:
+            with self.server_pool.lock:
+                for s in self.server_pool.servers:
+                    if s.enabled and s.name == preferred_server:
+                        candidates = [s]
+                        break
+        if not candidates:
+            candidates = self.server_pool.get_candidates(require_explicit=(self.route_mode == "direct"))
         if not candidates:
             return {"ok": False, "error": "No enabled backend servers available"}, None
 
@@ -617,8 +649,9 @@ class FreeDnetProxyServer:
 
             is_socks5 = first[0] == 0x05
             is_http_connect = False
+            pinned_server_name = ""
             if is_socks5:
-                target = self._handshake_socks5(client_sock)
+                target, pinned_server_name = self._handshake_socks5(client_sock)
                 initial_data = b""
             else:
                 target, initial_data, is_http_connect = self._handshake_http(client_sock)
@@ -650,7 +683,7 @@ class FreeDnetProxyServer:
                 with self._stat_lock:
                     self.tx_bytes += len(initial_data)
 
-            open_res, pinned_backend = self._open_with_failover(host, port, init_b64)
+            open_res, pinned_backend = self._open_with_failover(host, port, init_b64, preferred_server=pinned_server_name)
             if not open_res.get("ok"):
                 self.log(f"Open failed {host}:{port} -> {open_res.get('error')}")
                 try:
@@ -698,17 +731,29 @@ class FreeDnetProxyServer:
     def _handshake_socks5(self, sock: socket.socket):
         header = self._recv_exact(sock, 2)
         if not header or header[0] != 0x05:
-            return None
+            return None, ""
         nmethods = header[1]
-        self._recv_exact(sock, nmethods)
-        sock.sendall(b"\x05\x00")
+        methods = self._recv_exact(sock, nmethods)
+        pinned_user = ""
+        if 0x02 in methods:
+            sock.sendall(b"\x05\x02")
+            auth_hdr = self._recv_exact(sock, 2)
+            ulen = auth_hdr[1]
+            uname = self._recv_exact(sock, ulen) if ulen > 0 else b""
+            plen = self._recv_exact(sock, 1)[0]
+            if plen > 0:
+                self._recv_exact(sock, plen)
+            pinned_user = uname.decode("utf-8", errors="replace").strip()
+            sock.sendall(b"\x01\x00")
+        else:
+            sock.sendall(b"\x05\x00")
 
         req = self._recv_exact(sock, 4)
         if not req or req[1] != 0x01:
             if req and req[1] == 0x03:
                 self.log("SOCKS5 UDP Associate ignored (TCP only)")
             sock.sendall(b"\x05\x07\x00\x01\x00\x00\x00\x00\x00\x00")
-            return None
+            return None, ""
 
         atyp = req[3]
         if atyp == 0x01:
@@ -720,10 +765,10 @@ class FreeDnetProxyServer:
             addr = socket.inet_ntop(socket.AF_INET6, self._recv_exact(sock, 16))
         else:
             sock.sendall(b"\x05\x08\x00\x01\x00\x00\x00\x00\x00\x00")
-            return None
+            return None, ""
 
         port = struct.unpack("!H", self._recv_exact(sock, 2))[0]
-        return (addr, port)
+        return (addr, port), pinned_user
 
     def _handshake_http(self, sock: socket.socket):
         buf = b""
