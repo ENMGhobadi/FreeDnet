@@ -114,8 +114,7 @@ def set_windows_system_proxy(enable: bool, host: str = "127.0.0.1", port: int = 
             if enable:
                 winreg.SetValueEx(key, "ProxyServer", 0, winreg.REG_SZ, f"{host}:{port}")
                 winreg.SetValueEx(key, "ProxyOverride", 0, winreg.REG_SZ, "localhost;127.*;10.*;172.16.*;192.168.*;<local>")
-                wininet_val = 1
-                winreg.SetValueEx(key, "ProxyEnable", 0, winreg.REG_DWORD, wininet_val)
+                winreg.SetValueEx(key, "ProxyEnable", 0, winreg.REG_DWORD, 1)
             else:
                 winreg.SetValueEx(key, "ProxyEnable", 0, winreg.REG_DWORD, 0)
         wininet = ctypes.windll.wininet
@@ -144,6 +143,7 @@ DEFAULT_CONFIG = {
     "quota_preset": DEFAULT_PRESET,
     "keep_awake": True,
     "theme": "Midnight Dark (Default)",
+    "language": "English",
     "accounts": [],
     "servers": [],
 }
@@ -1510,6 +1510,497 @@ QDialog {{
 }}
 """
 
+LANGUAGES = {
+    "English": {
+        "rtl": False,
+        "win_title": "FreeDnet Pro — Smart Proxy Router",
+        "subtitle": "Smart Tunnel & Multi-Relay Router",
+        "stopped": "● STOPPED",
+        "running": "● RUNNING",
+        "sys_proxy_off": "Sys Proxy: OFF",
+        "sys_proxy_on": "Sys Proxy: ON",
+        "tun_off": "TUN Mode: OFF",
+        "tun_on": "TUN Mode: ON",
+        "tun_starting": "Starting TUN...",
+        "start_proxy": "▶  Start Proxy",
+        "stop_proxy": "■  Stop Proxy",
+        "tab_overview": "Overview",
+        "tab_gas": "GAS Accounts",
+        "tab_servers": "Backend Servers",
+        "tab_diag": "IP & Diagnostics",
+        "tab_settings": "Settings & Logs",
+        "kpi_tunnels": "ACTIVE TUNNELS",
+        "kpi_speed": "LIVE SPEED (↓ / ↑)",
+        "kpi_peak": "PEAK SPEED (↓ / ↑)",
+        "kpi_traffic": "TOTAL USAGE (↓ / ↑)",
+        "kpi_pool": "POOL HEALTH",
+        "chain_mode": "Chain Mode:",
+        "rb_gas": "Via Google Apps Script (Anti-Filtering)",
+        "rb_direct": "Direct to Backend (Max Speed)",
+        "exit_ip_unset": "Exit IP: Not checked yet",
+        "recent_activity": "Recent Activity",
+        "row_tip": "Tip: Right-click any account or server row for actions",
+        "fair_share": "Fair-Share Quota (1/N Equal)",
+        "free_quota": "Free Gmail Quota:",
+        "add_gas": "+ Add GAS",
+        "gas_hint": "Right-click any row to Edit, Enable/Disable, Reorder, Ping, or Remove.",
+        "gas_headers": ["#", "Account", "Status", "Active", "Daily Quota", "Share %", "Latency", "GAS Web App URL"],
+        "backend_mode": "Backend Mode:",
+        "add_server": "+ Add Server",
+        "srv_headers": ["#", "Server Name", "Status", "Requests", "Errors", "Latency", "Server URL"],
+        "diag_title": "Real Exit IP & Country Check",
+        "diag_check_btn": "Check Country / IP Now",
+        "kpi_exit_ip": "EXIT IP ADDRESS",
+        "kpi_country": "COUNTRY / CITY",
+        "kpi_isp": "ISP / ORGANIZATION",
+        "conn_tests": "Connection Tests:",
+        "ping_all": "Ping All Relays & Servers",
+        "test_e2e": "Test Proxy (E2E)",
+        "auth_key": "Auth Key:",
+        "show": "Show",
+        "paste": "Paste",
+        "theme": "Theme:",
+        "language": "Language:",
+        "listen_ip": "Listen IP:",
+        "port": "Port:",
+        "keep_awake": "Keep Awake (10m)",
+        "full_log": "Full Activity Log",
+        "copy_logs": "Copy Logs",
+        "clear": "Clear",
+        "tray_open": "Open FreeDnet",
+        "tray_start": "Start Proxy",
+        "tray_stop": "Stop Proxy",
+        "tray_exit": "Exit",
+    },
+    "فارسی (Persian)": {
+        "rtl": True,
+        "win_title": "FreeDnet Pro — مسیریاب هوشمند پروکسی",
+        "subtitle": "تونل هوشمند و رله چندسروره",
+        "stopped": "● متوقف",
+        "running": "● متصل",
+        "sys_proxy_off": "پروکسی سیستم: خاموش",
+        "sys_proxy_on": "پروکسی سیستم: روشن",
+        "tun_off": "حالت TUN: خاموش",
+        "tun_on": "حالت TUN: روشن",
+        "tun_starting": "در حال راه‌اندازی TUN...",
+        "start_proxy": "▶  شروع پروکسی",
+        "stop_proxy": "■  توقف پروکسی",
+        "tab_overview": "نمای کلی",
+        "tab_gas": "اکانت‌های GAS",
+        "tab_servers": "سرورهای بک‌اند",
+        "tab_diag": "آی‌پی و عیب‌یابی",
+        "tab_settings": "تنظیمات و لاگ",
+        "kpi_tunnels": "تونل‌های فعال",
+        "kpi_speed": "سرعت لحظه‌ای (↓ / ↑)",
+        "kpi_peak": "اوج سرعت (↓ / ↑)",
+        "kpi_traffic": "مصرف کل (↓ / ↑)",
+        "kpi_pool": "سلامت استخر",
+        "chain_mode": "مسیر اتصال:",
+        "rb_gas": "از طریق گوگل اسکریپت (ضد فیلتر)",
+        "rb_direct": "مستقیم به بک‌اند (حداکثر سرعت)",
+        "exit_ip_unset": "آی‌پی خروجی: بررسی نشده",
+        "recent_activity": "فعالیت‌های اخیر",
+        "row_tip": "نکته: برای مدیریت هر ردیف روی آن راست‌کلیک کنید",
+        "fair_share": "تقسیم عادلانه سهمیه (1/N مساوی)",
+        "free_quota": "سقف اکانت رایگان جیمیل:",
+        "add_gas": "+ افزودن GAS",
+        "gas_hint": "برای ویرایش، فعال/غیرفعال، جابه‌جایی، پینگ یا حذف روی ردیف راست‌کلیک کنید.",
+        "gas_headers": ["#", "نام اکانت", "وضعیت", "فعال", "سهمیه روزانه", "سهم %", "تاخیر", "آدرس وب‌اپ GAS"],
+        "backend_mode": "حالت بک‌اند:",
+        "add_server": "+ افزودن سرور",
+        "srv_headers": ["#", "نام سرور", "وضعیت", "درخواست‌ها", "خطاها", "تاخیر", "آدرس سرور"],
+        "diag_title": "بررسی آی‌پی خروجی و کشور واقعی",
+        "diag_check_btn": "بررسی کشور / آی‌پی",
+        "kpi_exit_ip": "آدرس آی‌پی خروجی",
+        "kpi_country": "کشور / شهر",
+        "kpi_isp": "سرویس‌دهنده / سازمان",
+        "conn_tests": "تست‌های اتصال:",
+        "ping_all": "پینگ همه رله‌ها و سرورها",
+        "test_e2e": "تست کامل پروکسی (E2E)",
+        "auth_key": "کلید احراز هویت:",
+        "show": "نمایش",
+        "paste": "جای‌گذاری",
+        "theme": "تم ظاهری:",
+        "language": "زبان:",
+        "listen_ip": "آی‌پی محلی:",
+        "port": "پورت:",
+        "keep_awake": "بیدار نگه‌داشتن (۱۰ دقیقه)",
+        "full_log": "گزارش کامل فعالیت‌ها",
+        "copy_logs": "کپی لاگ‌ها",
+        "clear": "پاک کردن",
+        "tray_open": "باز کردن FreeDnet",
+        "tray_start": "شروع پروکسی",
+        "tray_stop": "توقف پروکسی",
+        "tray_exit": "خروج",
+    },
+    "中文 (Chinese)": {
+        "rtl": False,
+        "win_title": "FreeDnet Pro — 智能代理路由器",
+        "subtitle": "智能隧道与多中继路由",
+        "stopped": "● 已停止",
+        "running": "● 运行中",
+        "sys_proxy_off": "系统代理: 关",
+        "sys_proxy_on": "系统代理: 开",
+        "tun_off": "TUN 模式: 关",
+        "tun_on": "TUN 模式: 开",
+        "tun_starting": "正在启动 TUN...",
+        "start_proxy": "▶  启动代理",
+        "stop_proxy": "■  停止代理",
+        "tab_overview": "概览",
+        "tab_gas": "GAS 账号",
+        "tab_servers": "后端服务器",
+        "tab_diag": "IP 与诊断",
+        "tab_settings": "设置与日志",
+        "kpi_tunnels": "活跃隧道",
+        "kpi_speed": "实时速度 (↓ / ↑)",
+        "kpi_peak": "峰值速度 (↓ / ↑)",
+        "kpi_traffic": "总流量 (↓ / ↑)",
+        "kpi_pool": "节点池状态",
+        "chain_mode": "连接模式:",
+        "rb_gas": "通过 Google Apps Script (抗封锁)",
+        "rb_direct": "直连后端 (最高速度)",
+        "exit_ip_unset": "出口 IP: 尚未检测",
+        "recent_activity": "最近活动",
+        "row_tip": "提示: 右键点击任意账号或服务器行可执行操作",
+        "fair_share": "配额均分 (1/N 均衡)",
+        "free_quota": "免费 Gmail 配额:",
+        "add_gas": "+ 添加 GAS",
+        "gas_hint": "右键点击任意行可编辑、启用/禁用、排序、Ping 或删除。",
+        "gas_headers": ["#", "账号", "状态", "并发", "每日配额", "占比 %", "延迟", "GAS Web App URL"],
+        "backend_mode": "后端模式:",
+        "add_server": "+ 添加服务器",
+        "srv_headers": ["#", "服务器名称", "状态", "请求数", "错误数", "延迟", "服务器 URL"],
+        "diag_title": "真实出口 IP 与国家/地区检测",
+        "diag_check_btn": "立即检测国家 / IP",
+        "kpi_exit_ip": "出口 IP 地址",
+        "kpi_country": "国家 / 城市",
+        "kpi_isp": "运营商 / 组织",
+        "conn_tests": "连接测试:",
+        "ping_all": "Ping 所有中继与服务器",
+        "test_e2e": "端到端代理测试 (E2E)",
+        "auth_key": "认证密钥:",
+        "show": "显示",
+        "paste": "粘贴",
+        "theme": "主题:",
+        "language": "语言:",
+        "listen_ip": "监听 IP:",
+        "port": "端口:",
+        "keep_awake": "保持唤醒 (10分钟)",
+        "full_log": "完整活动日志",
+        "copy_logs": "复制日志",
+        "clear": "清空",
+        "tray_open": "打开 FreeDnet",
+        "tray_start": "启动代理",
+        "tray_stop": "停止代理",
+        "tray_exit": "退出",
+    },
+    "Español (Spanish)": {
+        "rtl": False,
+        "win_title": "FreeDnet Pro — Enrutador Proxy Inteligente",
+        "subtitle": "Túnel Inteligente y Multi-Relay",
+        "stopped": "● DETENIDO",
+        "running": "● ACTIVO",
+        "sys_proxy_off": "Proxy Sistema: OFF",
+        "sys_proxy_on": "Proxy Sistema: ON",
+        "tun_off": "Modo TUN: OFF",
+        "tun_on": "Modo TUN: ON",
+        "tun_starting": "Iniciando TUN...",
+        "start_proxy": "▶  Iniciar Proxy",
+        "stop_proxy": "■  Detener Proxy",
+        "tab_overview": "Resumen",
+        "tab_gas": "Cuentas GAS",
+        "tab_servers": "Servidores Backend",
+        "tab_diag": "IP y Diagnóstico",
+        "tab_settings": "Ajustes y Registros",
+        "kpi_tunnels": "TÚNELES ACTIVOS",
+        "kpi_speed": "VELOCIDAD (↓ / ↑)",
+        "kpi_peak": "PICO MÁXIMO (↓ / ↑)",
+        "kpi_traffic": "USO TOTAL (↓ / ↑)",
+        "kpi_pool": "ESTADO DEL POOL",
+        "chain_mode": "Modo de Ruta:",
+        "rb_gas": "Vía Google Apps Script (Anti-Bloqueo)",
+        "rb_direct": "Directo al Backend (Máx. Velocidad)",
+        "exit_ip_unset": "IP de Salida: Sin comprobar",
+        "recent_activity": "Actividad Reciente",
+        "row_tip": "Consejo: Haz clic derecho en cualquier fila para ver acciones",
+        "fair_share": "Cuota Equitativa (1/N Igual)",
+        "free_quota": "Cuota Gmail Gratis:",
+        "add_gas": "+ Añadir GAS",
+        "gas_hint": "Clic derecho en una fila para Editar, Activar/Desactivar, Ordenar, Ping o Eliminar.",
+        "gas_headers": ["#", "Cuenta", "Estado", "Activo", "Cuota Diaria", "Uso %", "Latencia", "URL Web App GAS"],
+        "backend_mode": "Modo Backend:",
+        "add_server": "+ Añadir Servidor",
+        "srv_headers": ["#", "Servidor", "Estado", "Peticiones", "Errores", "Latencia", "URL del Servidor"],
+        "diag_title": "Comprobación Real de IP y País",
+        "diag_check_btn": "Comprobar País / IP",
+        "kpi_exit_ip": "DIRECCIÓN IP SALIDA",
+        "kpi_country": "PAÍS / CIUDAD",
+        "kpi_isp": "ISP / ORGANIZACIÓN",
+        "conn_tests": "Pruebas de Conexión:",
+        "ping_all": "Ping a Todos los Relays",
+        "test_e2e": "Probar Proxy (E2E)",
+        "auth_key": "Clave Auth:",
+        "show": "Mostrar",
+        "paste": "Pegar",
+        "theme": "Tema:",
+        "language": "Idioma:",
+        "listen_ip": "IP Local:",
+        "port": "Puerto:",
+        "keep_awake": "Mantener Activo (10m)",
+        "full_log": "Registro Completo de Actividad",
+        "copy_logs": "Copiar Registros",
+        "clear": "Limpiar",
+        "tray_open": "Abrir FreeDnet",
+        "tray_start": "Iniciar Proxy",
+        "tray_stop": "Detener Proxy",
+        "tray_exit": "Salir",
+    },
+    "Deutsch (German)": {
+        "rtl": False,
+        "win_title": "FreeDnet Pro — Intelligenter Proxy-Router",
+        "subtitle": "Smart Tunnel & Multi-Relay Router",
+        "stopped": "● GESTOPPT",
+        "running": "● LÄUFT",
+        "sys_proxy_off": "Sys-Proxy: AUS",
+        "sys_proxy_on": "Sys-Proxy: AN",
+        "tun_off": "TUN-Modus: AUS",
+        "tun_on": "TUN-Modus: AN",
+        "tun_starting": "TUN startet...",
+        "start_proxy": "▶  Proxy starten",
+        "stop_proxy": "■  Proxy stoppen",
+        "tab_overview": "Übersicht",
+        "tab_gas": "GAS-Konten",
+        "tab_servers": "Backend-Server",
+        "tab_diag": "IP & Diagnose",
+        "tab_settings": "Einstellungen & Logs",
+        "kpi_tunnels": "AKTIVE TUNNEL",
+        "kpi_speed": "GESCHWINDIGKEIT (↓ / ↑)",
+        "kpi_peak": "SPITZENWERT (↓ / ↑)",
+        "kpi_traffic": "GESAMTVERBRAUCH (↓ / ↑)",
+        "kpi_pool": "POOL-STATUS",
+        "chain_mode": "Routing-Modus:",
+        "rb_gas": "Über Google Apps Script (Anti-Zensur)",
+        "rb_direct": "Direkt zum Backend (Max. Tempo)",
+        "exit_ip_unset": "Ausgangs-IP: Nicht geprüft",
+        "recent_activity": "Letzte Aktivitäten",
+        "row_tip": "Tipp: Rechtsklick auf eine Zeile für weitere Aktionen",
+        "fair_share": "Faire Verteilung (1/N Gleich)",
+        "free_quota": "Gratis Gmail-Kontingent:",
+        "add_gas": "+ GAS hinzufügen",
+        "gas_hint": "Rechtsklick auf eine Zeile zum Bearbeiten, Aktivieren, Sortieren, Pingen oder Entfernen.",
+        "gas_headers": ["#", "Konto", "Status", "Aktiv", "Tageslimit", "Anteil %", "Latenz", "GAS Web-App-URL"],
+        "backend_mode": "Backend-Modus:",
+        "add_server": "+ Server hinzufügen",
+        "srv_headers": ["#", "Servername", "Status", "Anfragen", "Fehler", "Latenz", "Server-URL"],
+        "diag_title": "Echte Ausgangs-IP & Länderprüfung",
+        "diag_check_btn": "Land / IP jetzt prüfen",
+        "kpi_exit_ip": "AUSGANGS-IP-ADRESSE",
+        "kpi_country": "LAND / STADT",
+        "kpi_isp": "ANBIETER / ORGANISATION",
+        "conn_tests": "Verbindungstests:",
+        "ping_all": "Alle Relays & Server pingen",
+        "test_e2e": "Proxy testen (E2E)",
+        "auth_key": "Auth-Schlüssel:",
+        "show": "Zeigen",
+        "paste": "Einfügen",
+        "theme": "Design:",
+        "language": "Sprache:",
+        "listen_ip": "Lokale IP:",
+        "port": "Port:",
+        "keep_awake": "Wach halten (10m)",
+        "full_log": "Vollständiges Aktivitätsprotokoll",
+        "copy_logs": "Logs kopieren",
+        "clear": "Leeren",
+        "tray_open": "FreeDnet öffnen",
+        "tray_start": "Proxy starten",
+        "tray_stop": "Proxy stoppen",
+        "tray_exit": "Beenden",
+    },
+    "Русский (Russian)": {
+        "rtl": False,
+        "win_title": "FreeDnet Pro — Умный прокси-роутер",
+        "subtitle": "Умный туннель и мульти-ретранслятор",
+        "stopped": "● ОСТАНОВЛЕН",
+        "running": "● РАБОТАЕТ",
+        "sys_proxy_off": "Сист. прокси: ВЫКЛ",
+        "sys_proxy_on": "Сист. прокси: ВКЛ",
+        "tun_off": "Режим TUN: ВЫКЛ",
+        "tun_on": "Режим TUN: ВКЛ",
+        "tun_starting": "Запуск TUN...",
+        "start_proxy": "▶  Запустить прокси",
+        "stop_proxy": "■  Остановить прокси",
+        "tab_overview": "Обзор",
+        "tab_gas": "Аккаунты GAS",
+        "tab_servers": "Серверы",
+        "tab_diag": "IP и диагностика",
+        "tab_settings": "Настройки и логи",
+        "kpi_tunnels": "АКТИВНЫЕ ТУННЕЛИ",
+        "kpi_speed": "СКОРОСТЬ (↓ / ↑)",
+        "kpi_peak": "ПИКОВАЯ СКОРОСТЬ (↓ / ↑)",
+        "kpi_traffic": "ТРАФИК (↓ / ↑)",
+        "kpi_pool": "СОСТОЯНИЕ ПУЛА",
+        "chain_mode": "Режим маршрута:",
+        "rb_gas": "Через Google Apps Script (Обход)",
+        "rb_direct": "Напрямую к серверу (Макс. скорость)",
+        "exit_ip_unset": "Выходной IP: не проверен",
+        "recent_activity": "Последняя активность",
+        "row_tip": "Совет: нажмите правой кнопкой по строке для действий",
+        "fair_share": "Равномерная квота (1/N)",
+        "free_quota": "Лимит Gmail:",
+        "add_gas": "+ Добавить GAS",
+        "gas_hint": "ПКМ по строке: изменить, вкл/выкл, переместить, пинг или удалить.",
+        "gas_headers": ["#", "Аккаунт", "Статус", "Актив.", "Дневной лимит", "Доля %", "Пинг", "URL GAS Web App"],
+        "backend_mode": "Режим сервера:",
+        "add_server": "+ Добавить сервер",
+        "srv_headers": ["#", "Сервер", "Статус", "Запросы", "Ошибки", "Пинг", "URL сервера"],
+        "diag_title": "Проверка реального IP и страны",
+        "diag_check_btn": "Проверить страну / IP",
+        "kpi_exit_ip": "ВЫХОДНОЙ IP-АДРЕС",
+        "kpi_country": "СТРАНА / ГОРОД",
+        "kpi_isp": "ПРОВАЙДЕР / ОРГ.",
+        "conn_tests": "Тесты соединения:",
+        "ping_all": "Пинг всех реле и серверов",
+        "test_e2e": "Тест прокси (E2E)",
+        "auth_key": "Ключ доступа:",
+        "show": "Показать",
+        "paste": "Вставить",
+        "theme": "Тема:",
+        "language": "Язык:",
+        "listen_ip": "Локальный IP:",
+        "port": "Порт:",
+        "keep_awake": "Не усыплять (10м)",
+        "full_log": "Полный журнал событий",
+        "copy_logs": "Копировать логи",
+        "clear": "Очистить",
+        "tray_open": "Открыть FreeDnet",
+        "tray_start": "Запустить прокси",
+        "tray_stop": "Остановить прокси",
+        "tray_exit": "Выход",
+    },
+    "日本語 (Japanese)": {
+        "rtl": False,
+        "win_title": "FreeDnet Pro — スマートプロキシ ルーター",
+        "subtitle": "スマートトンネル & マルチリレー",
+        "stopped": "● 停止中",
+        "running": "● 稼働中",
+        "sys_proxy_off": "システムプロキシ: OFF",
+        "sys_proxy_on": "システムプロキシ: ON",
+        "tun_off": "TUN モード: OFF",
+        "tun_on": "TUN モード: ON",
+        "tun_starting": "TUN 起動中...",
+        "start_proxy": "▶  プロキシ開始",
+        "stop_proxy": "■  プロキシ停止",
+        "tab_overview": "概要",
+        "tab_gas": "GAS アカウント",
+        "tab_servers": "バックエンドサーバー",
+        "tab_diag": "IP と診断",
+        "tab_settings": "設定とログ",
+        "kpi_tunnels": "アクティブ接続",
+        "kpi_speed": "現在速度 (↓ / ↑)",
+        "kpi_peak": "最大速度 (↓ / ↑)",
+        "kpi_traffic": "合計通信量 (↓ / ↑)",
+        "kpi_pool": "プール状態",
+        "chain_mode": "接続モード:",
+        "rb_gas": "Google Apps Script 経由 (検閲回避)",
+        "rb_direct": "バックエンド直結 (最高速度)",
+        "exit_ip_unset": "出口 IP: 未確認",
+        "recent_activity": "最近のアクティビティ",
+        "row_tip": "ヒント: 行を右クリックすると操作メニューが開きます",
+        "fair_share": "均等配分 (1/N)",
+        "free_quota": "無料 Gmail 上限:",
+        "add_gas": "+ GAS 追加",
+        "gas_hint": "行を右クリックで編集・有効/無効・並べ替え・Ping・削除ができます。",
+        "gas_headers": ["#", "アカウント", "状態", "同時数", "日次枠", "割合 %", "遅延", "GAS Web App URL"],
+        "backend_mode": "サーバーモード:",
+        "add_server": "+ サーバー追加",
+        "srv_headers": ["#", "サーバー名", "状態", "リクエスト", "エラー", "遅延", "サーバー URL"],
+        "diag_title": "出口 IP・国チェック",
+        "diag_check_btn": "国 / IP を確認",
+        "kpi_exit_ip": "出口 IP アドレス",
+        "kpi_country": "国 / 都市",
+        "kpi_isp": "ISP / 組織",
+        "conn_tests": "接続テスト:",
+        "ping_all": "全リレー＆サーバーに Ping",
+        "test_e2e": "プロキシテスト (E2E)",
+        "auth_key": "認証キー:",
+        "show": "表示",
+        "paste": "貼り付け",
+        "theme": "テーマ:",
+        "language": "言語:",
+        "listen_ip": "待機 IP:",
+        "port": "ポート:",
+        "keep_awake": "スリープ防止 (10分)",
+        "full_log": "詳細アクティビティログ",
+        "copy_logs": "ログをコピー",
+        "clear": "クリア",
+        "tray_open": "FreeDnet を開く",
+        "tray_start": "プロキシ開始",
+        "tray_stop": "プロキシ停止",
+        "tray_exit": "終了",
+    },
+    "한국어 (Korean)": {
+        "rtl": False,
+        "win_title": "FreeDnet Pro — 스마트 프록시 라우터",
+        "subtitle": "스마트 터널 & 멀티 릴레이 라우터",
+        "stopped": "● 중지됨",
+        "running": "● 실행 중",
+        "sys_proxy_off": "시스템 프록시: OFF",
+        "sys_proxy_on": "시스템 프록시: ON",
+        "tun_off": "TUN 모드: OFF",
+        "tun_on": "TUN 모드: ON",
+        "tun_starting": "TUN 시작 중...",
+        "start_proxy": "▶  프록시 시작",
+        "stop_proxy": "■  프록시 중지",
+        "tab_overview": "개요",
+        "tab_gas": "GAS 계정",
+        "tab_servers": "백엔드 서버",
+        "tab_diag": "IP 및 진단",
+        "tab_settings": "설정 및 로그",
+        "kpi_tunnels": "활성 터널",
+        "kpi_speed": "실시간 속도 (↓ / ↑)",
+        "kpi_peak": "최고 속도 (↓ / ↑)",
+        "kpi_traffic": "총 사용량 (↓ / ↑)",
+        "kpi_pool": "풀 상태",
+        "chain_mode": "연결 모드:",
+        "rb_gas": "Google Apps Script 경유 (차단 우회)",
+        "rb_direct": "백엔드 직접 연결 (최고 속도)",
+        "exit_ip_unset": "출구 IP: 확인 전",
+        "recent_activity": "최근 활동",
+        "row_tip": "팁: 항목을 마우스 오른쪽 버튼으로 클릭하면 작업 메뉴가 열립니다",
+        "fair_share": "균등 할당 (1/N)",
+        "free_quota": "무료 Gmail 한도:",
+        "add_gas": "+ GAS 추가",
+        "gas_hint": "행을 우클릭하여 편집, 활성/비활성, 순서 변경, Ping 또는 삭제할 수 있습니다.",
+        "gas_headers": ["#", "계정", "상태", "활성", "일일 한도", "비율 %", "지연", "GAS Web App URL"],
+        "backend_mode": "백엔드 모드:",
+        "add_server": "+ 서버 추가",
+        "srv_headers": ["#", "서버 이름", "상태", "요청 수", "오류", "지연", "서버 URL"],
+        "diag_title": "실제 출구 IP 및 국가 확인",
+        "diag_check_btn": "국가 / IP 확인",
+        "kpi_exit_ip": "출구 IP 주소",
+        "kpi_country": "국가 / 도시",
+        "kpi_isp": "ISP / 기관",
+        "conn_tests": "연결 테스트:",
+        "ping_all": "모든 릴레이 및 서버 Ping",
+        "test_e2e": "프록시 테스트 (E2E)",
+        "auth_key": "인증 키:",
+        "show": "표시",
+        "paste": "붙여넣기",
+        "theme": "테마:",
+        "language": "언어:",
+        "listen_ip": "수신 IP:",
+        "port": "포트:",
+        "keep_awake": "절전 방지 (10분)",
+        "full_log": "전체 활동 로그",
+        "copy_logs": "로그 복사",
+        "clear": "지우기",
+        "tray_open": "FreeDnet 열기",
+        "tray_start": "프록시 시작",
+        "tray_stop": "프록시 중지",
+        "tray_exit": "종료",
+    },
+}
+
 class EntryDialog(QDialog):
     def __init__(self, parent, title: str, name_label: str, url_label: str, name: str = "", url: str = ""):
         super().__init__(parent)
@@ -1601,6 +2092,7 @@ class FreeDnetProWindow(QMainWindow):
             self.log(self._config_load_err)
         self._current_theme_is_light = False
         self._apply_theme(self.config.get("theme", "Midnight Dark (Default)"), save=False)
+        self._apply_language(self.config.get("language", "English"), save=False)
         self._refresh_target_dropdown()
         self._sync_tables()
 
@@ -1631,6 +2123,8 @@ class FreeDnetProWindow(QMainWindow):
         self.config["keep_awake"] = self.chk_keep_awake.isChecked()
         if hasattr(self, "theme_combo"):
             self.config["theme"] = self.theme_combo.currentText()
+        if hasattr(self, "lang_combo"):
+            self.config["language"] = self.lang_combo.currentText()
         try:
             self.config["listen_port"] = int(self.port_edit.text().strip())
         except ValueError:
@@ -1649,15 +2143,15 @@ class FreeDnetProWindow(QMainWindow):
         self.tray.setToolTip("FreeDnet Pro")
 
         menu = QMenu(self)
-        act_open = menu.addAction("Open FreeDnet")
-        act_open.triggered.connect(self._restore_from_tray)
+        self.tray_open_act = menu.addAction("Open FreeDnet")
+        self.tray_open_act.triggered.connect(self._restore_from_tray)
         self.tray_proxy_act = menu.addAction("Start Proxy")
         self.tray_proxy_act.triggered.connect(self.toggle_proxy)
         self.tray_tun_act = menu.addAction("TUN Mode: OFF")
         self.tray_tun_act.triggered.connect(self.toggle_tun_mode)
         menu.addSeparator()
-        act_exit = menu.addAction("Exit")
-        act_exit.triggered.connect(self._quit_app)
+        self.tray_exit_act = menu.addAction("Exit")
+        self.tray_exit_act.triggered.connect(self._quit_app)
 
         self.tray.setContextMenu(menu)
         self.tray.activated.connect(self._on_tray_activated)
@@ -1744,7 +2238,8 @@ class FreeDnetProWindow(QMainWindow):
         h_lay.addSpacing(8)
         h_lay.addWidget(QLabel("PRO", objectName="ProBadge"))
         h_lay.addSpacing(12)
-        h_lay.addWidget(QLabel("Smart Tunnel & Multi-Relay Router", objectName="Muted"))
+        self.subtitle_lbl = QLabel("Smart Tunnel & Multi-Relay Router", objectName="Muted")
+        h_lay.addWidget(self.subtitle_lbl)
         h_lay.addStretch()
 
         self.status_pill = QLabel("● STOPPED", objectName="StatusPillStopped")
@@ -1790,11 +2285,11 @@ class FreeDnetProWindow(QMainWindow):
 
         kpi_row = QHBoxLayout()
         kpi_row.setSpacing(10)
-        self.kpi_tunnels = self._make_kpi_card(kpi_row, "ACTIVE TUNNELS", "0")
-        self.kpi_speed = self._make_kpi_card(kpi_row, "LIVE SPEED (↓ / ↑)", "0 B/s  |  0 B/s")
-        self.kpi_peak = self._make_kpi_card(kpi_row, "PEAK SPEED (↓ / ↑)", "0 B/s  |  0 B/s")
-        self.kpi_traffic = self._make_kpi_card(kpi_row, "TOTAL USAGE (↓ / ↑)", "0 B  |  0 B")
-        self.kpi_pool = self._make_kpi_card(kpi_row, "POOL HEALTH", "GAS 0 | SRV 0")
+        self.kpi_tunnels, self.kpi_tunnels_ttl = self._make_kpi_card_ex(kpi_row, "ACTIVE TUNNELS", "0")
+        self.kpi_speed, self.kpi_speed_ttl = self._make_kpi_card_ex(kpi_row, "LIVE SPEED (↓ / ↑)", "0 B/s  |  0 B/s")
+        self.kpi_peak, self.kpi_peak_ttl = self._make_kpi_card_ex(kpi_row, "PEAK SPEED (↓ / ↑)", "0 B/s  |  0 B/s")
+        self.kpi_traffic, self.kpi_traffic_ttl = self._make_kpi_card_ex(kpi_row, "TOTAL USAGE (↓ / ↑)", "0 B  |  0 B")
+        self.kpi_pool, self.kpi_pool_ttl = self._make_kpi_card_ex(kpi_row, "POOL HEALTH", "GAS 0 | SRV 0")
         ov_lay.addLayout(kpi_row)
 
         route_card = QFrame(objectName="Card")
@@ -1803,7 +2298,8 @@ class FreeDnetProWindow(QMainWindow):
         r_lay.setSpacing(12)
 
         r1 = QHBoxLayout()
-        r1.addWidget(QLabel("Chain Mode:", objectName="FieldLabel"))
+        self.lbl_chain_mode = QLabel("Chain Mode:", objectName="FieldLabel")
+        r1.addWidget(self.lbl_chain_mode)
         self.rb_gas = QRadioButton("Via Google Apps Script (Anti-Filtering)")
         self.rb_direct = QRadioButton("Direct to Backend (Max Speed)")
         self.route_grp = QButtonGroup(self)
@@ -1825,9 +2321,11 @@ class FreeDnetProWindow(QMainWindow):
 
         # Compact recent activity preview on Overview
         ov_log_hdr = QHBoxLayout()
-        ov_log_hdr.addWidget(QLabel("Recent Activity", objectName="FieldLabel"))
+        self.lbl_recent_act = QLabel("Recent Activity", objectName="FieldLabel")
+        ov_log_hdr.addWidget(self.lbl_recent_act)
         ov_log_hdr.addStretch()
-        ov_log_hdr.addWidget(QLabel("Tip: Right-click any account or server row for actions", objectName="Muted"))
+        self.lbl_row_tip = QLabel("Tip: Right-click any account or server row for actions", objectName="Muted")
+        ov_log_hdr.addWidget(self.lbl_row_tip)
         ov_lay.addLayout(ov_log_hdr)
 
         self.ov_log_preview = QTextEdit(objectName="LogConsole")
@@ -1852,7 +2350,8 @@ class FreeDnetProWindow(QMainWindow):
         gt_lay.addWidget(self.chk_fair_share)
         gt_lay.addStretch()
 
-        gt_lay.addWidget(QLabel("Free Gmail Quota:", objectName="FieldLabel"))
+        self.lbl_free_quota = QLabel("Free Gmail Quota:", objectName="FieldLabel")
+        gt_lay.addWidget(self.lbl_free_quota)
         self.preset_combo = QComboBox()
         self.preset_combo.addItems(list(GAS_QUOTA_PRESETS.keys()))
         init_preset = self.config.get("quota_preset", DEFAULT_PRESET)
@@ -1862,7 +2361,8 @@ class FreeDnetProWindow(QMainWindow):
         self.preset_combo.currentTextChanged.connect(self._on_preset_change)
         gt_lay.addWidget(self.preset_combo)
 
-        add_g = QPushButton("+ Add GAS", objectName="PrimaryBtn")
+        self.add_g_btn = QPushButton("+ Add GAS", objectName="PrimaryBtn")
+        add_g = self.add_g_btn
         add_g.clicked.connect(self.add_account)
         gt_lay.addSpacing(8)
         gt_lay.addWidget(add_g)
@@ -1873,7 +2373,8 @@ class FreeDnetProWindow(QMainWindow):
         self.gas_table.customContextMenuRequested.connect(self._show_gas_context_menu)
         self.gas_table.doubleClicked.connect(lambda _: self.edit_account())
         gas_lay.addWidget(self.gas_table, stretch=1)
-        gas_lay.addWidget(QLabel("Right-click any row to Edit, Enable/Disable, Reorder, Ping, or Remove.", objectName="Muted"))
+        self.lbl_gas_hint = QLabel("Right-click any row to Edit, Enable/Disable, Reorder, Ping, or Remove.", objectName="Muted")
+        gas_lay.addWidget(self.lbl_gas_hint)
         self.tabs.addTab(gas_tab, "GAS Accounts")
 
         # ==========================================================
@@ -1887,13 +2388,15 @@ class FreeDnetProWindow(QMainWindow):
         srv_toolbar = QFrame(objectName="Toolbar")
         st_lay = QHBoxLayout(srv_toolbar)
         st_lay.setContentsMargins(12, 8, 12, 8)
-        st_lay.addWidget(QLabel("Backend Mode:", objectName="FieldLabel"))
+        self.lbl_backend_mode = QLabel("Backend Mode:", objectName="FieldLabel")
+        st_lay.addWidget(self.lbl_backend_mode)
         self.target_combo = QComboBox()
         self.target_combo.setMinimumWidth(250)
         self.target_combo.currentTextChanged.connect(self._on_target_change)
         st_lay.addWidget(self.target_combo)
         st_lay.addStretch()
-        add_s = QPushButton("+ Add Server", objectName="PrimaryBtn")
+        self.add_s_btn = QPushButton("+ Add Server", objectName="PrimaryBtn")
+        add_s = self.add_s_btn
         add_s.clicked.connect(self.add_server)
         st_lay.addWidget(add_s)
         srv_lay.addWidget(srv_toolbar)
@@ -1919,7 +2422,8 @@ class FreeDnetProWindow(QMainWindow):
         ip_lay.setSpacing(12)
 
         ip_hdr = QHBoxLayout()
-        ip_hdr.addWidget(QLabel("Real Exit IP & Country Check", objectName="FieldLabel"))
+        self.lbl_diag_title = QLabel("Real Exit IP & Country Check", objectName="FieldLabel")
+        ip_hdr.addWidget(self.lbl_diag_title)
         ip_hdr.addStretch()
         self.diag_country_btn = QPushButton("Check Country / IP Now", objectName="PrimaryBtn")
         self.diag_country_btn.clicked.connect(self.check_country_ip)
@@ -1928,19 +2432,22 @@ class FreeDnetProWindow(QMainWindow):
 
         ip_kpi_row = QHBoxLayout()
         ip_kpi_row.setSpacing(10)
-        self.diag_ip_val = self._make_kpi_card(ip_kpi_row, "EXIT IP ADDRESS", "-")
-        self.diag_country_val = self._make_kpi_card(ip_kpi_row, "COUNTRY / CITY", "-")
-        self.diag_isp_val = self._make_kpi_card(ip_kpi_row, "ISP / ORGANIZATION", "-")
+        self.diag_ip_val, self.diag_ip_ttl = self._make_kpi_card_ex(ip_kpi_row, "EXIT IP ADDRESS", "-")
+        self.diag_country_val, self.diag_country_ttl = self._make_kpi_card_ex(ip_kpi_row, "COUNTRY / CITY", "-")
+        self.diag_isp_val, self.diag_isp_ttl = self._make_kpi_card_ex(ip_kpi_row, "ISP / ORGANIZATION", "-")
         ip_lay.addLayout(ip_kpi_row)
         diag_lay.addWidget(ip_card)
 
         tools_card = QFrame(objectName="Card")
         t_lay = QHBoxLayout(tools_card)
         t_lay.setContentsMargins(16, 14, 16, 14)
-        t_lay.addWidget(QLabel("Connection Tests:", objectName="FieldLabel"))
+        self.lbl_conn_tests = QLabel("Connection Tests:", objectName="FieldLabel")
+        t_lay.addWidget(self.lbl_conn_tests)
         t_lay.addSpacing(10)
-        d_ping = QPushButton("Ping All Relays & Servers")
-        d_e2e = QPushButton("Test Proxy (E2E)")
+        self.d_ping_btn = QPushButton("Ping All Relays & Servers")
+        d_ping = self.d_ping_btn
+        self.d_e2e_btn = QPushButton("Test Proxy (E2E)")
+        d_e2e = self.d_e2e_btn
         d_ping.clicked.connect(self.test_all_accounts)
         d_e2e.clicked.connect(self.test_proxy_e2e)
         t_lay.addWidget(d_ping)
@@ -1964,7 +2471,8 @@ class FreeDnetProWindow(QMainWindow):
         cfg_vlay.setSpacing(10)
 
         c_lay1 = QHBoxLayout()
-        c_lay1.addWidget(QLabel("Auth Key:", objectName="FieldLabel"))
+        self.lbl_auth_key = QLabel("Auth Key:", objectName="FieldLabel")
+        c_lay1.addWidget(self.lbl_auth_key)
         self.auth_edit = QLineEdit(self.config["auth_key"])
         self.auth_edit.setEchoMode(QLineEdit.Password)
         self.auth_edit.setMinimumWidth(220)
@@ -1976,12 +2484,14 @@ class FreeDnetProWindow(QMainWindow):
         )
         c_lay1.addWidget(self.chk_show_key)
 
-        paste_btn = QPushButton("Paste", objectName="SmallBtn")
+        self.paste_btn = QPushButton("Paste", objectName="SmallBtn")
+        paste_btn = self.paste_btn
         paste_btn.clicked.connect(self._paste_auth_key)
         c_lay1.addWidget(paste_btn)
         c_lay1.addStretch()
 
-        c_lay1.addWidget(QLabel("Theme:", objectName="FieldLabel"))
+        self.lbl_theme = QLabel("Theme:", objectName="FieldLabel")
+        c_lay1.addWidget(self.lbl_theme)
         self.theme_combo = QComboBox()
         self.theme_combo.addItems(list(THEMES.keys()))
         saved_theme = self.config.get("theme", "Midnight Dark (Default)")
@@ -1993,16 +2503,30 @@ class FreeDnetProWindow(QMainWindow):
         cfg_vlay.addLayout(c_lay1)
 
         c_lay2 = QHBoxLayout()
-        c_lay2.addWidget(QLabel("Listen IP:", objectName="FieldLabel"))
+        self.lbl_listen_ip = QLabel("Listen IP:", objectName="FieldLabel")
+        c_lay2.addWidget(self.lbl_listen_ip)
         self.host_edit = QLineEdit(self.config["listen_host"])
         self.host_edit.setFixedWidth(125)
         c_lay2.addWidget(self.host_edit)
 
         c_lay2.addSpacing(8)
-        c_lay2.addWidget(QLabel("Port:", objectName="FieldLabel"))
+        self.lbl_port = QLabel("Port:", objectName="FieldLabel")
+        c_lay2.addWidget(self.lbl_port)
         self.port_edit = QLineEdit(str(self.config["listen_port"]))
         self.port_edit.setFixedWidth(72)
         c_lay2.addWidget(self.port_edit)
+
+        c_lay2.addSpacing(12)
+        self.lbl_language = QLabel("Language:", objectName="FieldLabel")
+        c_lay2.addWidget(self.lbl_language)
+        self.lang_combo = QComboBox()
+        self.lang_combo.addItems(list(LANGUAGES.keys()))
+        saved_lang = self.config.get("language", "English")
+        if saved_lang in LANGUAGES:
+            self.lang_combo.setCurrentText(saved_lang)
+        self.lang_combo.setMinimumWidth(190)
+        self.lang_combo.currentTextChanged.connect(lambda name: self._apply_language(name, save=True))
+        c_lay2.addWidget(self.lang_combo)
 
         c_lay2.addStretch()
         self.chk_keep_awake = QCheckBox("Keep Awake (10m)")
@@ -2013,11 +2537,14 @@ class FreeDnetProWindow(QMainWindow):
         set_lay.addWidget(cfg_card)
 
         log_hdr = QHBoxLayout()
-        log_hdr.addWidget(QLabel("Full Activity Log", objectName="FieldLabel"))
+        self.lbl_full_log = QLabel("Full Activity Log", objectName="FieldLabel")
+        log_hdr.addWidget(self.lbl_full_log)
         log_hdr.addStretch()
-        cpy_btn = QPushButton("Copy Logs", objectName="SmallBtn")
+        self.cpy_btn = QPushButton("Copy Logs", objectName="SmallBtn")
+        cpy_btn = self.cpy_btn
         cpy_btn.clicked.connect(lambda: QApplication.clipboard().setText(self.log_console.toPlainText()))
-        clr_btn = QPushButton("Clear", objectName="SmallBtn")
+        self.clr_btn = QPushButton("Clear", objectName="SmallBtn")
+        clr_btn = self.clr_btn
         clr_btn.clicked.connect(lambda: (self.log_console.clear(), self.ov_log_preview.clear()))
         log_hdr.addWidget(cpy_btn)
         log_hdr.addWidget(clr_btn)
@@ -2141,6 +2668,18 @@ class FreeDnetProWindow(QMainWindow):
                 self.log(f"Backend FAILED [{srv.name}]: {res.get('error')}")
                 return
 
+    def _make_kpi_card_ex(self, parent_layout, title: str, initial: str) -> tuple[QLabel, QLabel]:
+        card = QFrame(objectName="KpiCard")
+        lay = QVBoxLayout(card)
+        lay.setContentsMargins(14, 10, 14, 10)
+        lay.setSpacing(2)
+        ttl = QLabel(title, objectName="KpiTitle")
+        lay.addWidget(ttl)
+        val = QLabel(initial, objectName="KpiValue")
+        lay.addWidget(val)
+        parent_layout.addWidget(card)
+        return val, ttl
+
     def _make_kpi_card(self, parent_layout, title: str, initial: str) -> QLabel:
         card = QFrame(objectName="KpiCard")
         lay = QVBoxLayout(card)
@@ -2230,6 +2769,95 @@ class FreeDnetProWindow(QMainWindow):
         if save:
             self._save_config()
             self.log(f"Theme changed to: {theme_name}")
+
+    def _t(self, key: str):
+        lang = getattr(self, "_current_lang", "English")
+        return LANGUAGES.get(lang, LANGUAGES["English"]).get(key, LANGUAGES["English"].get(key, key))
+
+    def _apply_language(self, lang_name: str, save: bool = True):
+        if lang_name not in LANGUAGES:
+            lang_name = "English"
+        self._current_lang = lang_name
+        app = QApplication.instance()
+        if app is not None:
+            app.setLayoutDirection(Qt.RightToLeft if LANGUAGES[lang_name]["rtl"] else Qt.LeftToRight)
+        self._retranslate_ui()
+        if save:
+            self._save_config()
+            self.log(f"Language changed to: {lang_name}")
+
+    def _retranslate_ui(self):
+        self.setWindowTitle(self._t("win_title"))
+        self.subtitle_lbl.setText(self._t("subtitle"))
+        running = bool(self.proxy and self.proxy.running)
+        if running:
+            lbl = "DIRECT" if self.proxy.route_mode == "direct" else "GAS"
+            self.status_pill.setText(f"{self._t('running')} · {lbl}")
+            self.start_btn.setText(self._t("stop_proxy"))
+        else:
+            self.status_pill.setText(self._t("stopped"))
+            self.start_btn.setText(self._t("start_proxy"))
+
+        self.sys_proxy_btn.setText(self._t("sys_proxy_on") if self.sys_proxy_active else self._t("sys_proxy_off"))
+        if self.tun_btn.isEnabled():
+            self.tun_btn.setText(self._t("tun_on") if self.tun_active else self._t("tun_off"))
+
+        self.tabs.setTabText(0, self._t("tab_overview"))
+        self.tabs.setTabText(1, self._t("tab_gas"))
+        self.tabs.setTabText(2, self._t("tab_servers"))
+        self.tabs.setTabText(3, self._t("tab_diag"))
+        self.tabs.setTabText(4, self._t("tab_settings"))
+
+        self.kpi_tunnels_ttl.setText(self._t("kpi_tunnels"))
+        self.kpi_speed_ttl.setText(self._t("kpi_speed"))
+        self.kpi_peak_ttl.setText(self._t("kpi_peak"))
+        self.kpi_traffic_ttl.setText(self._t("kpi_traffic"))
+        self.kpi_pool_ttl.setText(self._t("kpi_pool"))
+
+        self.lbl_chain_mode.setText(self._t("chain_mode"))
+        self.rb_gas.setText(self._t("rb_gas"))
+        self.rb_direct.setText(self._t("rb_direct"))
+        if self.ip_badge.text().startswith(("Exit IP: Not", "آی‌پی خروجی:", "出口 IP:", "IP de Salida:", "Ausgangs-IP:", "Выходной IP:", "출구 IP:")):
+            self.ip_badge.setText(self._t("exit_ip_unset"))
+        self.lbl_recent_act.setText(self._t("recent_activity"))
+        self.lbl_row_tip.setText(self._t("row_tip"))
+
+        self.chk_fair_share.setText(self._t("fair_share"))
+        self.lbl_free_quota.setText(self._t("free_quota"))
+        self.add_g_btn.setText(self._t("add_gas"))
+        self.lbl_gas_hint.setText(self._t("gas_hint"))
+        self.gas_table.setHorizontalHeaderLabels(self._t("gas_headers"))
+
+        self.lbl_backend_mode.setText(self._t("backend_mode"))
+        self.add_s_btn.setText(self._t("add_server"))
+        self.srv_table.setHorizontalHeaderLabels(self._t("srv_headers"))
+
+        self.lbl_diag_title.setText(self._t("diag_title"))
+        self.diag_country_btn.setText(self._t("diag_check_btn"))
+        self.diag_ip_ttl.setText(self._t("kpi_exit_ip"))
+        self.diag_country_ttl.setText(self._t("kpi_country"))
+        self.diag_isp_ttl.setText(self._t("kpi_isp"))
+        self.lbl_conn_tests.setText(self._t("conn_tests"))
+        self.d_ping_btn.setText(self._t("ping_all"))
+        self.d_e2e_btn.setText(self._t("test_e2e"))
+
+        self.lbl_auth_key.setText(self._t("auth_key"))
+        self.chk_show_key.setText(self._t("show"))
+        self.paste_btn.setText(self._t("paste"))
+        self.lbl_theme.setText(self._t("theme"))
+        self.lbl_language.setText(self._t("language"))
+        self.lbl_listen_ip.setText(self._t("listen_ip"))
+        self.lbl_port.setText(self._t("port"))
+        self.chk_keep_awake.setText(self._t("keep_awake"))
+        self.lbl_full_log.setText(self._t("full_log"))
+        self.cpy_btn.setText(self._t("copy_logs"))
+        self.clr_btn.setText(self._t("clear"))
+
+        if getattr(self, "tray", None):
+            self.tray_open_act.setText(self._t("tray_open"))
+            self.tray_proxy_act.setText(self._t("tray_stop") if running else self._t("tray_start"))
+            self.tray_tun_act.setText(self._t("tun_on") if self.tun_active else self._t("tun_off"))
+            self.tray_exit_act.setText(self._t("tray_exit"))
 
     def _on_route_change(self):
         mode = "direct" if self.rb_direct.isChecked() else "gas"
@@ -2488,7 +3116,7 @@ class FreeDnetProWindow(QMainWindow):
             if self.sys_proxy_active:
                 set_windows_system_proxy(False)
                 self.sys_proxy_active = False
-                self.sys_proxy_btn.setText("Sys Proxy: OFF")
+                self.sys_proxy_btn.setText(self._t("sys_proxy_off"))
                 self.sys_proxy_btn.setObjectName("")
                 self.sys_proxy_btn.style().unpolish(self.sys_proxy_btn)
                 self.sys_proxy_btn.style().polish(self.sys_proxy_btn)
@@ -2496,11 +3124,11 @@ class FreeDnetProWindow(QMainWindow):
             self.proxy = None
             self._save_config()
             self.status_pill.setObjectName("StatusPillStopped")
-            self.status_pill.setText("● STOPPED")
+            self.status_pill.setText(self._t("stopped"))
             self.status_pill.style().unpolish(self.status_pill)
             self.status_pill.style().polish(self.status_pill)
             self.start_btn.setObjectName("PrimaryBtn")
-            self.start_btn.setText("▶  Start Proxy")
+            self.start_btn.setText(self._t("start_proxy"))
             self.start_btn.style().unpolish(self.start_btn)
             self.start_btn.style().polish(self.start_btn)
             return
@@ -2530,11 +3158,11 @@ class FreeDnetProWindow(QMainWindow):
             self.proxy.start()
             lbl = "DIRECT" if mode == "direct" else "GAS"
             self.status_pill.setObjectName("StatusPillRunning")
-            self.status_pill.setText(f"● RUNNING · {lbl}")
+            self.status_pill.setText(f"{self._t('running')} · {lbl}")
             self.status_pill.style().unpolish(self.status_pill)
             self.status_pill.style().polish(self.status_pill)
             self.start_btn.setObjectName("DangerBtn")
-            self.start_btn.setText("■  Stop Proxy")
+            self.start_btn.setText(self._t("stop_proxy"))
             self.start_btn.style().unpolish(self.start_btn)
             self.start_btn.style().polish(self.start_btn)
         except Exception as e:
@@ -2747,7 +3375,7 @@ class FreeDnetProWindow(QMainWindow):
         if self.sys_proxy_active:
             set_windows_system_proxy(False)
             self.sys_proxy_active = False
-            self.sys_proxy_btn.setText("Sys Proxy: OFF")
+            self.sys_proxy_btn.setText(self._t("sys_proxy_off"))
             self.sys_proxy_btn.setObjectName("")
             self.sys_proxy_btn.style().unpolish(self.sys_proxy_btn)
             self.sys_proxy_btn.style().polish(self.sys_proxy_btn)
@@ -2760,7 +3388,7 @@ class FreeDnetProWindow(QMainWindow):
         port = int(self.config["listen_port"])
         if set_windows_system_proxy(True, host, port):
             self.sys_proxy_active = True
-            self.sys_proxy_btn.setText("Sys Proxy: ON")
+            self.sys_proxy_btn.setText(self._t("sys_proxy_on"))
             self.sys_proxy_btn.setObjectName("PrimaryBtn")
             self.sys_proxy_btn.style().unpolish(self.sys_proxy_btn)
             self.sys_proxy_btn.style().polish(self.sys_proxy_btn)
@@ -2769,7 +3397,7 @@ class FreeDnetProWindow(QMainWindow):
     def toggle_tun_mode(self):
         if self.tun_active:
             self._stop_tun_process()
-            self.tun_btn.setText("TUN Mode: OFF")
+            self.tun_btn.setText(self._t("tun_off"))
             self.tun_btn.setObjectName("")
             self.tun_btn.style().unpolish(self.tun_btn)
             self.tun_btn.style().polish(self.tun_btn)
@@ -2798,7 +3426,7 @@ class FreeDnetProWindow(QMainWindow):
                 return
 
         self.tun_btn.setEnabled(False)
-        self.tun_btn.setText("Starting TUN...")
+        self.tun_btn.setText(self._t("tun_starting"))
 
         def worker():
             tid = self._start_busy("Preparing Xray TUN & Wintun...")
@@ -2839,10 +3467,10 @@ class FreeDnetProWindow(QMainWindow):
     def _update_tun_btn_ui(self):
         self.tun_btn.setEnabled(True)
         if self.tun_active:
-            self.tun_btn.setText("TUN Mode: ON")
+            self.tun_btn.setText(self._t("tun_on"))
             self.tun_btn.setObjectName("PrimaryBtn")
         else:
-            self.tun_btn.setText("TUN Mode: OFF")
+            self.tun_btn.setText(self._t("tun_off"))
             self.tun_btn.setObjectName("")
         self.tun_btn.style().unpolish(self.tun_btn)
         self.tun_btn.style().polish(self.tun_btn)
@@ -2964,8 +3592,8 @@ class FreeDnetProWindow(QMainWindow):
 
         if getattr(self, "tray", None):
             running = bool(self.proxy and self.proxy.running)
-            self.tray_proxy_act.setText("Stop Proxy" if running else "Start Proxy")
-            self.tray_tun_act.setText("TUN Mode: ON" if self.tun_active else "TUN Mode: OFF")
+            self.tray_proxy_act.setText(self._t("tray_stop") if running else self._t("tray_start"))
+            self.tray_tun_act.setText(self._t("tun_on") if self.tun_active else self._t("tun_off"))
 
 
 def main():
