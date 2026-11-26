@@ -1279,6 +1279,8 @@ class FreeDnetProWindow(QMainWindow):
 
         self._force_quit = False
         self._tray_notified = False
+        self._tun_ui_dirty = False
+        self._pending_ip_info = None
         self.proxy = None
         self.xray_proc = None
         self.tun_active = False
@@ -1582,7 +1584,52 @@ class FreeDnetProWindow(QMainWindow):
         self.tabs.addTab(srv_tab, "Backend Servers")
 
         # ==========================================================
-        # TAB 4: SETTINGS & FULL LOGS
+        # TAB 4: IP & DIAGNOSTICS (Dedicated Country Check & Tests)
+        # ==========================================================
+        diag_tab = QWidget()
+        diag_lay = QVBoxLayout(diag_tab)
+        diag_lay.setContentsMargins(16, 16, 16, 16)
+        diag_lay.setSpacing(14)
+
+        ip_card = QFrame(objectName="Card")
+        ip_lay = QVBoxLayout(ip_card)
+        ip_lay.setContentsMargins(16, 16, 16, 16)
+        ip_lay.setSpacing(12)
+
+        ip_hdr = QHBoxLayout()
+        ip_hdr.addWidget(QLabel("Real Exit IP & Country Check", objectName="FieldLabel"))
+        ip_hdr.addStretch()
+        self.diag_country_btn = QPushButton("Check Country / IP Now", objectName="PrimaryBtn")
+        self.diag_country_btn.clicked.connect(self.check_country_ip)
+        ip_hdr.addWidget(self.diag_country_btn)
+        ip_lay.addLayout(ip_hdr)
+
+        ip_kpi_row = QHBoxLayout()
+        ip_kpi_row.setSpacing(10)
+        self.diag_ip_val = self._make_kpi_card(ip_kpi_row, "EXIT IP ADDRESS", "-")
+        self.diag_country_val = self._make_kpi_card(ip_kpi_row, "COUNTRY / CITY", "-")
+        self.diag_isp_val = self._make_kpi_card(ip_kpi_row, "ISP / ORGANIZATION", "-")
+        ip_lay.addLayout(ip_kpi_row)
+        diag_lay.addWidget(ip_card)
+
+        tools_card = QFrame(objectName="Card")
+        t_lay = QHBoxLayout(tools_card)
+        t_lay.setContentsMargins(16, 14, 16, 14)
+        t_lay.addWidget(QLabel("Connection Tests:", objectName="FieldLabel"))
+        t_lay.addSpacing(10)
+        d_ping = QPushButton("Ping All Relays & Servers")
+        d_e2e = QPushButton("Test Proxy (E2E)")
+        d_ping.clicked.connect(self.test_all_accounts)
+        d_e2e.clicked.connect(self.test_proxy_e2e)
+        t_lay.addWidget(d_ping)
+        t_lay.addWidget(d_e2e)
+        t_lay.addStretch()
+        diag_lay.addWidget(tools_card)
+        diag_lay.addStretch()
+        self.tabs.addTab(diag_tab, "IP & Diagnostics")
+
+        # ==========================================================
+        # TAB 5: SETTINGS & FULL LOGS
         # ==========================================================
         set_tab = QWidget()
         set_lay = QVBoxLayout(set_tab)
@@ -2164,7 +2211,7 @@ class FreeDnetProWindow(QMainWindow):
                     if city:
                         loc = f"{loc} - {city}"
                     self.log(f"Country Check OK [{name}]: IP={ip} | {loc} | {isp}")
-                    QTimer.singleShot(0, lambda t=f"Exit IP: {ip} ({loc})": self.ip_badge.setText(t))
+                    self._pending_ip_info = (str(ip), str(loc), str(isp or "-"))
                     return
                 except Exception as e:
                     self.log(f"Country Check [{name}] failed ({e}), trying next...")
@@ -2226,12 +2273,14 @@ class FreeDnetProWindow(QMainWindow):
             "inbounds": [
                 {
                     "tag": "tun-in",
-                    "port": 0,
                     "protocol": "tun",
                     "settings": {
                         "name": "FreeDnetTUN",
-                        "MTU": 1400,
-                        "autoSystemRoutingTable": True,
+                        "desc": "FreeDnet",
+                        "mtu": 1400,
+                        "gateway": ["10.0.0.1/16"],
+                        "dns": ["1.1.1.1", "8.8.8.8"],
+                        "autoSystemRoutingTable": ["0.0.0.0/0"],
                         "autoOutboundsInterface": "auto",
                     },
                     "sniffing": {"enabled": True, "destOverride": ["http", "tls", "quic"]},
@@ -2321,18 +2370,27 @@ class FreeDnetProWindow(QMainWindow):
                 self.xray_proc = subprocess.Popen(
                     [XRAY_EXE, "run", "-c", XRAY_TUN_CFG],
                     cwd=XRAY_DIR,
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.STDOUT,
+                    text=True,
                     creationflags=flags,
                 )
-                time.sleep(1.2)
+                time.sleep(1.5)
                 if self.xray_proc.poll() is not None:
-                    raise RuntimeError("xray.exe exited unexpectedly (check Admin rights / Wintun)")
+                    out = ""
+                    try:
+                        out, _ = self.xray_proc.communicate(timeout=2)
+                    except Exception:
+                        pass
+                    err_line = " | ".join(ln.strip() for ln in out.splitlines() if ln.strip())[-220:]
+                    raise RuntimeError(err_line or "xray.exe exited unexpectedly (check Admin rights / Wintun)")
                 self.tun_active = True
                 self.log("Xray TUN Mode ACTIVE -> Virtual adapter 'FreeDnetTUN' created (visible in Control Panel & Task Manager).")
             except Exception as e:
                 self.tun_active = False
                 self.log(f"TUN Mode FAILED -> {e}")
             finally:
-                QTimer.singleShot(0, self._update_tun_btn_ui)
+                self._tun_ui_dirty = True
 
         threading.Thread(target=worker, daemon=True).start()
 
@@ -2431,6 +2489,18 @@ class FreeDnetProWindow(QMainWindow):
         else:
             self.kpi_tunnels.setText("0")
             self.kpi_speed.setText("0 B/s  |  0 B/s")
+
+        if self._tun_ui_dirty:
+            self._tun_ui_dirty = False
+            self._update_tun_btn_ui()
+
+        if self._pending_ip_info is not None:
+            ip, loc, isp = self._pending_ip_info
+            self._pending_ip_info = None
+            self.ip_badge.setText(f"Exit IP: {ip} ({loc})")
+            self.diag_ip_val.setText(ip)
+            self.diag_country_val.setText(loc)
+            self.diag_isp_val.setText(isp)
 
         if getattr(self, "tray", None):
             running = bool(self.proxy and self.proxy.running)
