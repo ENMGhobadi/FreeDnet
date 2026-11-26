@@ -1548,6 +1548,8 @@ LANGUAGES = {
         "backend_mode": "Backend Mode:",
         "add_server": "+ Add Server",
         "deploy_render": "🚀 Deploy on Render",
+        "deploy_snap": "🚀 Deploy on SnapDeploy",
+        "remove_btn": "Remove",
         "srv_headers": ["#", "Server Name", "Status", "Requests", "Errors", "Latency", "Server URL"],
         "diag_title": "Real Exit IP & Country Check",
         "diag_check_btn": "Check Country / IP Now",
@@ -1610,6 +1612,8 @@ LANGUAGES = {
         "backend_mode": "حالت بک‌اند:",
         "add_server": "+ افزودن سرور",
         "deploy_render": "🚀 دیپلوی روی Render",
+        "deploy_snap": "🚀 دیپلوی روی SnapDeploy",
+        "remove_btn": "حذف",
         "srv_headers": ["#", "نام سرور", "وضعیت", "درخواست‌ها", "خطاها", "تاخیر", "آدرس سرور"],
         "diag_title": "بررسی آی‌پی خروجی و کشور واقعی",
         "diag_check_btn": "بررسی کشور / آی‌پی",
@@ -1672,6 +1676,8 @@ LANGUAGES = {
         "backend_mode": "后端模式:",
         "add_server": "+ 添加服务器",
         "deploy_render": "🚀 部署到 Render",
+        "deploy_snap": "🚀 部署到 SnapDeploy",
+        "remove_btn": "删除",
         "srv_headers": ["#", "服务器名称", "状态", "请求数", "错误数", "延迟", "服务器 URL"],
         "diag_title": "真实出口 IP 与国家/地区检测",
         "diag_check_btn": "立即检测国家 / IP",
@@ -1734,6 +1740,8 @@ LANGUAGES = {
         "backend_mode": "Modo Backend:",
         "add_server": "+ Añadir Servidor",
         "deploy_render": "🚀 Desplegar en Render",
+        "deploy_snap": "🚀 Desplegar en SnapDeploy",
+        "remove_btn": "Eliminar",
         "srv_headers": ["#", "Servidor", "Estado", "Peticiones", "Errores", "Latencia", "URL del Servidor"],
         "diag_title": "Comprobación Real de IP y País",
         "diag_check_btn": "Comprobar País / IP",
@@ -1796,6 +1804,8 @@ LANGUAGES = {
         "backend_mode": "Backend-Modus:",
         "add_server": "+ Server hinzufügen",
         "deploy_render": "🚀 Auf Render deployen",
+        "deploy_snap": "🚀 Auf SnapDeploy deployen",
+        "remove_btn": "Entfernen",
         "srv_headers": ["#", "Servername", "Status", "Anfragen", "Fehler", "Latenz", "Server-URL"],
         "diag_title": "Echte Ausgangs-IP & Länderprüfung",
         "diag_check_btn": "Land / IP jetzt prüfen",
@@ -1858,6 +1868,8 @@ LANGUAGES = {
         "backend_mode": "Режим сервера:",
         "add_server": "+ Добавить сервер",
         "deploy_render": "🚀 Деплой на Render",
+        "deploy_snap": "🚀 Деплой на SnapDeploy",
+        "remove_btn": "Удалить",
         "srv_headers": ["#", "Сервер", "Статус", "Запросы", "Ошибки", "Пинг", "URL сервера"],
         "diag_title": "Проверка реального IP и страны",
         "diag_check_btn": "Проверить страну / IP",
@@ -1920,6 +1932,8 @@ LANGUAGES = {
         "backend_mode": "サーバーモード:",
         "add_server": "+ サーバー追加",
         "deploy_render": "🚀 Render にデプロイ",
+        "deploy_snap": "🚀 SnapDeploy にデプロイ",
+        "remove_btn": "削除",
         "srv_headers": ["#", "サーバー名", "状態", "リクエスト", "エラー", "遅延", "サーバー URL"],
         "diag_title": "出口 IP・国チェック",
         "diag_check_btn": "国 / IP を確認",
@@ -1982,6 +1996,8 @@ LANGUAGES = {
         "backend_mode": "백엔드 모드:",
         "add_server": "+ 서버 추가",
         "deploy_render": "🚀 Render에 배포",
+        "deploy_snap": "🚀 SnapDeploy에 배포",
+        "remove_btn": "삭제",
         "srv_headers": ["#", "서버 이름", "상태", "요청 수", "오류", "지연", "서버 URL"],
         "diag_title": "실제 출구 IP 및 국가 확인",
         "diag_check_btn": "국가 / IP 확인",
@@ -2107,6 +2123,63 @@ class RenderDeployDialog(QDialog):
             "name": self.name_edit.text().strip(),
             "region": self.region_combo.currentData(),
             "repo": self.repo_edit.text().strip(),
+            "auth_key": self.auth_edit.text().strip() or "change-me-freednet-key",
+        }
+
+
+class SnapDeployDialog(QDialog):
+    def __init__(self, parent, default_auth_key: str):
+        super().__init__(parent)
+        self.setWindowTitle("Deploy FreeDnet Server on SnapDeploy")
+        self.setMinimumWidth(520)
+
+        layout = QVBoxLayout(self)
+        form = QFormLayout()
+
+        self.api_key_edit = QLineEdit()
+        self.api_key_edit.setEchoMode(QLineEdit.Password)
+        self.api_key_edit.setPlaceholderText("sk_... or sd_pat_...")
+        form.addRow("SnapDeploy API Key:", self.api_key_edit)
+
+        self.name_edit = QLineEdit(f"freednet-node-{int(time.time()) % 10000}")
+        form.addRow("Container Name:", self.name_edit)
+
+        self.repo_edit = QLineEdit("ENMGhobadi/FreeDnet")
+        form.addRow("GitHub Repo (owner/name):", self.repo_edit)
+
+        self.auth_edit = QLineEdit(default_auth_key)
+        form.addRow("AUTH_KEY (Env):", self.auth_edit)
+
+        layout.addLayout(form)
+        hint = QLabel("Runs on AWS US-East. GitHub must be connected in your SnapDeploy dashboard.", objectName="Muted")
+        hint.setWordWrap(True)
+        layout.addWidget(hint)
+
+        buttons = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
+        buttons.button(QDialogButtonBox.Ok).setText("Deploy Now")
+        buttons.accepted.connect(self._on_accept)
+        buttons.rejected.connect(self.reject)
+        layout.addWidget(buttons)
+
+    def _on_accept(self):
+        if not self.api_key_edit.text().strip():
+            QMessageBox.warning(self, "Missing API Key", "Please enter your SnapDeploy API Key.")
+            return
+        if not self.name_edit.text().strip():
+            QMessageBox.warning(self, "Missing Name", "Please enter a Container Name.")
+            return
+        repo = self.repo_edit.text().strip().replace("https://github.com/", "").strip("/")
+        if "/" not in repo:
+            QMessageBox.warning(self, "Invalid Repo", "Enter repo as owner/name (e.g. ENMGhobadi/FreeDnet).")
+            return
+        self.accept()
+
+    def values(self) -> dict:
+        repo = self.repo_edit.text().strip().replace("https://github.com/", "").strip("/")
+        return {
+            "api_key": self.api_key_edit.text().strip(),
+            "name": self.name_edit.text().strip(),
+            "repo": repo,
             "auth_key": self.auth_edit.text().strip() or "change-me-freednet-key",
         }
 
@@ -2445,6 +2518,10 @@ class FreeDnetProWindow(QMainWindow):
         add_g.clicked.connect(self.add_account)
         gt_lay.addSpacing(8)
         gt_lay.addWidget(add_g)
+        self.rem_g_btn = QPushButton("Remove")
+        self.rem_g_btn.clicked.connect(self.remove_account)
+        gt_lay.addSpacing(4)
+        gt_lay.addWidget(self.rem_g_btn)
         gas_lay.addWidget(gas_toolbar)
 
         self.gas_table = self._make_table(["#", "Account", "Status", "Active", "Daily Quota", "Share %", "Latency", "GAS Web App URL"])
@@ -2477,11 +2554,19 @@ class FreeDnetProWindow(QMainWindow):
         self.deploy_render_btn = QPushButton("🚀 Deploy on Render")
         self.deploy_render_btn.clicked.connect(self.deploy_on_render)
         st_lay.addWidget(self.deploy_render_btn)
-        st_lay.addSpacing(6)
+        st_lay.addSpacing(4)
+        self.deploy_snap_btn = QPushButton("🚀 Deploy on SnapDeploy")
+        self.deploy_snap_btn.clicked.connect(self.deploy_on_snapdeploy)
+        st_lay.addWidget(self.deploy_snap_btn)
+        st_lay.addSpacing(4)
         self.add_s_btn = QPushButton("+ Add Server", objectName="PrimaryBtn")
         add_s = self.add_s_btn
         add_s.clicked.connect(self.add_server)
         st_lay.addWidget(add_s)
+        st_lay.addSpacing(4)
+        self.rem_s_btn = QPushButton("Remove")
+        self.rem_s_btn.clicked.connect(self.remove_server)
+        st_lay.addWidget(self.rem_s_btn)
         srv_lay.addWidget(srv_toolbar)
 
         self.srv_table = self._make_table(["#", "Server Name", "Status", "Requests", "Errors", "Latency", "Server URL"])
@@ -2908,12 +2993,15 @@ class FreeDnetProWindow(QMainWindow):
         self.chk_fair_share.setText(self._t("fair_share"))
         self.lbl_free_quota.setText(self._t("free_quota"))
         self.add_g_btn.setText(self._t("add_gas"))
+        self.rem_g_btn.setText(self._t("remove_btn"))
         self.lbl_gas_hint.setText(self._t("gas_hint"))
         self.gas_table.setHorizontalHeaderLabels(self._t("gas_headers"))
 
         self.lbl_backend_mode.setText(self._t("backend_mode"))
         self.deploy_render_btn.setText(self._t("deploy_render"))
+        self.deploy_snap_btn.setText(self._t("deploy_snap"))
         self.add_s_btn.setText(self._t("add_server"))
+        self.rem_s_btn.setText(self._t("remove_btn"))
         self.srv_table.setHorizontalHeaderLabels(self._t("srv_headers"))
 
         self.lbl_diag_title.setText(self._t("diag_title"))
@@ -3070,6 +3158,53 @@ class FreeDnetProWindow(QMainWindow):
                 self.log(f"Render Deploy FAILED (HTTP {e.code}): {err_body}")
             except Exception as e:
                 self.log(f"Render Deploy FAILED: {e}")
+            finally:
+                self._stop_busy(tid)
+
+        threading.Thread(target=worker, daemon=True).start()
+
+    def deploy_on_snapdeploy(self):
+        dlg = SnapDeployDialog(self, self.auth_edit.text().strip() or "change-me-freednet-key")
+        if dlg.exec() != QDialog.Accepted:
+            return
+        params = dlg.values()
+
+        def worker():
+            tid = self._start_busy(f"Deploying {params['name']} on SnapDeploy...")
+            try:
+                headers = {
+                    "X-API-Key": params["api_key"],
+                    "Accept": "application/json",
+                    "Content-Type": "application/json",
+                    "User-Agent": "FreeDnet-Client/2.0",
+                }
+                payload = {
+                    "repo": params["repo"],
+                    "name": params["name"],
+                    "branch": "main",
+                    "size": "small",
+                    "env": {"AUTH_KEY": params["auth_key"]},
+                }
+                req = urllib.request.Request(
+                    "https://snapdeploy.dev/api/mobile/deploy",
+                    data=json.dumps(payload).encode("utf-8"),
+                    headers=headers,
+                    method="POST",
+                )
+                with _DIRECT_OPENER.open(req, timeout=30.0) as resp:
+                    created = json.loads(resp.read().decode("utf-8", errors="replace"))
+
+                svc_url = str(created.get("url") or "").strip()
+                if not svc_url:
+                    raise RuntimeError(f"SnapDeploy returned no URL: {created}")
+
+                self._pending_render_srv = (f"SnapDeploy ({params['name']})", svc_url)
+                self.log(f"SnapDeploy STARTED -> {svc_url} (build takes ~2-5 min)")
+            except urllib.error.HTTPError as e:
+                err_body = e.read().decode("utf-8", errors="replace")[:260]
+                self.log(f"SnapDeploy FAILED (HTTP {e.code}): {err_body}")
+            except Exception as e:
+                self.log(f"SnapDeploy FAILED: {e}")
             finally:
                 self._stop_busy(tid)
 
