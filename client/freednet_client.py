@@ -1547,6 +1547,7 @@ LANGUAGES = {
         "gas_headers": ["#", "Account", "Status", "Active", "Daily Quota", "Share %", "Latency", "GAS Web App URL"],
         "backend_mode": "Backend Mode:",
         "add_server": "+ Add Server",
+        "deploy_render": "🚀 Deploy on Render",
         "srv_headers": ["#", "Server Name", "Status", "Requests", "Errors", "Latency", "Server URL"],
         "diag_title": "Real Exit IP & Country Check",
         "diag_check_btn": "Check Country / IP Now",
@@ -1608,6 +1609,7 @@ LANGUAGES = {
         "gas_headers": ["#", "نام اکانت", "وضعیت", "فعال", "سهمیه روزانه", "سهم %", "تاخیر", "آدرس وب‌اپ GAS"],
         "backend_mode": "حالت بک‌اند:",
         "add_server": "+ افزودن سرور",
+        "deploy_render": "🚀 دیپلوی روی Render",
         "srv_headers": ["#", "نام سرور", "وضعیت", "درخواست‌ها", "خطاها", "تاخیر", "آدرس سرور"],
         "diag_title": "بررسی آی‌پی خروجی و کشور واقعی",
         "diag_check_btn": "بررسی کشور / آی‌پی",
@@ -1669,6 +1671,7 @@ LANGUAGES = {
         "gas_headers": ["#", "账号", "状态", "并发", "每日配额", "占比 %", "延迟", "GAS Web App URL"],
         "backend_mode": "后端模式:",
         "add_server": "+ 添加服务器",
+        "deploy_render": "🚀 部署到 Render",
         "srv_headers": ["#", "服务器名称", "状态", "请求数", "错误数", "延迟", "服务器 URL"],
         "diag_title": "真实出口 IP 与国家/地区检测",
         "diag_check_btn": "立即检测国家 / IP",
@@ -1730,6 +1733,7 @@ LANGUAGES = {
         "gas_headers": ["#", "Cuenta", "Estado", "Activo", "Cuota Diaria", "Uso %", "Latencia", "URL Web App GAS"],
         "backend_mode": "Modo Backend:",
         "add_server": "+ Añadir Servidor",
+        "deploy_render": "🚀 Desplegar en Render",
         "srv_headers": ["#", "Servidor", "Estado", "Peticiones", "Errores", "Latencia", "URL del Servidor"],
         "diag_title": "Comprobación Real de IP y País",
         "diag_check_btn": "Comprobar País / IP",
@@ -1791,6 +1795,7 @@ LANGUAGES = {
         "gas_headers": ["#", "Konto", "Status", "Aktiv", "Tageslimit", "Anteil %", "Latenz", "GAS Web-App-URL"],
         "backend_mode": "Backend-Modus:",
         "add_server": "+ Server hinzufügen",
+        "deploy_render": "🚀 Auf Render deployen",
         "srv_headers": ["#", "Servername", "Status", "Anfragen", "Fehler", "Latenz", "Server-URL"],
         "diag_title": "Echte Ausgangs-IP & Länderprüfung",
         "diag_check_btn": "Land / IP jetzt prüfen",
@@ -1852,6 +1857,7 @@ LANGUAGES = {
         "gas_headers": ["#", "Аккаунт", "Статус", "Актив.", "Дневной лимит", "Доля %", "Пинг", "URL GAS Web App"],
         "backend_mode": "Режим сервера:",
         "add_server": "+ Добавить сервер",
+        "deploy_render": "🚀 Деплой на Render",
         "srv_headers": ["#", "Сервер", "Статус", "Запросы", "Ошибки", "Пинг", "URL сервера"],
         "diag_title": "Проверка реального IP и страны",
         "diag_check_btn": "Проверить страну / IP",
@@ -1913,6 +1919,7 @@ LANGUAGES = {
         "gas_headers": ["#", "アカウント", "状態", "同時数", "日次枠", "割合 %", "遅延", "GAS Web App URL"],
         "backend_mode": "サーバーモード:",
         "add_server": "+ サーバー追加",
+        "deploy_render": "🚀 Render にデプロイ",
         "srv_headers": ["#", "サーバー名", "状態", "リクエスト", "エラー", "遅延", "サーバー URL"],
         "diag_title": "出口 IP・国チェック",
         "diag_check_btn": "国 / IP を確認",
@@ -1974,6 +1981,7 @@ LANGUAGES = {
         "gas_headers": ["#", "계정", "상태", "활성", "일일 한도", "비율 %", "지연", "GAS Web App URL"],
         "backend_mode": "백엔드 모드:",
         "add_server": "+ 서버 추가",
+        "deploy_render": "🚀 Render에 배포",
         "srv_headers": ["#", "서버 이름", "상태", "요청 수", "오류", "지연", "서버 URL"],
         "diag_title": "실제 출구 IP 및 국가 확인",
         "diag_check_btn": "국가 / IP 확인",
@@ -2033,6 +2041,76 @@ class EntryDialog(QDialog):
         return self.name_edit.text().strip(), self.url_edit.text().strip()
 
 
+RENDER_REGIONS = [
+    ("Frankfurt, Germany (EU)", "frankfurt"),
+    ("Oregon, USA (US West)", "oregon"),
+    ("Ohio, USA (US East)", "ohio"),
+    ("Virginia, USA (US East)", "virginia"),
+    ("Singapore (Asia)", "singapore"),
+]
+
+
+class RenderDeployDialog(QDialog):
+    def __init__(self, parent, default_auth_key: str):
+        super().__init__(parent)
+        self.setWindowTitle("Deploy FreeDnet Server on Render")
+        self.setMinimumWidth(520)
+
+        layout = QVBoxLayout(self)
+        form = QFormLayout()
+
+        self.api_key_edit = QLineEdit()
+        self.api_key_edit.setEchoMode(QLineEdit.Password)
+        self.api_key_edit.setPlaceholderText("rnd_xxxxxxxxxxxxxxxxxxxxxxxx")
+        form.addRow("Render API Key:", self.api_key_edit)
+
+        self.name_edit = QLineEdit(f"freednet-node-{int(time.time()) % 10000}")
+        form.addRow("Service Name:", self.name_edit)
+
+        self.region_combo = QComboBox()
+        for label, slug in RENDER_REGIONS:
+            self.region_combo.addItem(label, slug)
+        form.addRow("Region / Location:", self.region_combo)
+
+        self.repo_edit = QLineEdit("https://github.com/ENMGhobadi/FreeDnet")
+        form.addRow("GitHub Repo URL:", self.repo_edit)
+
+        self.auth_edit = QLineEdit(default_auth_key)
+        form.addRow("AUTH_KEY (Env):", self.auth_edit)
+
+        layout.addLayout(form)
+        hint = QLabel("Get your Render API Key from: dashboard.render.com/u/settings#api-keys", objectName="Muted")
+        hint.setWordWrap(True)
+        layout.addWidget(hint)
+
+        buttons = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
+        buttons.button(QDialogButtonBox.Ok).setText("Deploy Now")
+        buttons.accepted.connect(self._on_accept)
+        buttons.rejected.connect(self.reject)
+        layout.addWidget(buttons)
+
+    def _on_accept(self):
+        if not self.api_key_edit.text().strip():
+            QMessageBox.warning(self, "Missing API Key", "Please enter your Render API Key.")
+            return
+        if not self.name_edit.text().strip():
+            QMessageBox.warning(self, "Missing Name", "Please enter a Service Name.")
+            return
+        if not self.repo_edit.text().strip().startswith("https://github.com/"):
+            QMessageBox.warning(self, "Invalid Repo", "Please enter a valid https://github.com/... repository URL.")
+            return
+        self.accept()
+
+    def values(self) -> dict:
+        return {
+            "api_key": self.api_key_edit.text().strip(),
+            "name": self.name_edit.text().strip(),
+            "region": self.region_combo.currentData(),
+            "repo": self.repo_edit.text().strip(),
+            "auth_key": self.auth_edit.text().strip() or "change-me-freednet-key",
+        }
+
+
 class FreeDnetProWindow(QMainWindow):
     SRV_PRIORITY_LBL = "Priority (#1 -> #2 Failover)"
     SRV_FAIR_LBL = "Fair-Share (1/N Equal)"
@@ -2067,6 +2145,7 @@ class FreeDnetProWindow(QMainWindow):
         self._tray_notified = False
         self._tun_ui_dirty = False
         self._pending_ip_info = None
+        self._pending_render_srv = None
         self._busy_lock = threading.Lock()
         self._busy_tasks: dict[int, str] = {}
         self._busy_seq = 0
@@ -2395,6 +2474,10 @@ class FreeDnetProWindow(QMainWindow):
         self.target_combo.currentTextChanged.connect(self._on_target_change)
         st_lay.addWidget(self.target_combo)
         st_lay.addStretch()
+        self.deploy_render_btn = QPushButton("🚀 Deploy on Render")
+        self.deploy_render_btn.clicked.connect(self.deploy_on_render)
+        st_lay.addWidget(self.deploy_render_btn)
+        st_lay.addSpacing(6)
         self.add_s_btn = QPushButton("+ Add Server", objectName="PrimaryBtn")
         add_s = self.add_s_btn
         add_s.clicked.connect(self.add_server)
@@ -2829,6 +2912,7 @@ class FreeDnetProWindow(QMainWindow):
         self.gas_table.setHorizontalHeaderLabels(self._t("gas_headers"))
 
         self.lbl_backend_mode.setText(self._t("backend_mode"))
+        self.deploy_render_btn.setText(self._t("deploy_render"))
         self.add_s_btn.setText(self._t("add_server"))
         self.srv_table.setHorizontalHeaderLabels(self._t("srv_headers"))
 
@@ -2923,6 +3007,74 @@ class FreeDnetProWindow(QMainWindow):
             self.log(f"Removed GAS account: {removed.name}")
 
     # --- Backend Server CRUD ---
+    def deploy_on_render(self):
+        dlg = RenderDeployDialog(self, self.auth_edit.text().strip() or "change-me-freednet-key")
+        if dlg.exec() != QDialog.Accepted:
+            return
+        params = dlg.values()
+
+        def worker():
+            tid = self._start_busy(f"Deploying {params['name']} on Render ({params['region']})...")
+            try:
+                headers = {
+                    "Authorization": f"Bearer {params['api_key']}",
+                    "Accept": "application/json",
+                    "Content-Type": "application/json",
+                    "User-Agent": "FreeDnet-Client/2.0",
+                }
+                req_owners = urllib.request.Request("https://api.render.com/v1/owners?limit=20", headers=headers, method="GET")
+                with _DIRECT_OPENER.open(req_owners, timeout=20.0) as resp:
+                    owners = json.loads(resp.read().decode("utf-8", errors="replace"))
+                if not owners or not isinstance(owners, list):
+                    raise RuntimeError("No Render workspace/owner found for this API key.")
+                owner_id = owners[0]["owner"]["id"]
+
+                payload = {
+                    "type": "web_service",
+                    "name": params["name"],
+                    "ownerId": owner_id,
+                    "repo": params["repo"],
+                    "branch": "main",
+                    "autoDeployTrigger": "commit",
+                    "envVars": [{"key": "AUTH_KEY", "value": params["auth_key"]}],
+                    "serviceDetails": {
+                        "runtime": "docker",
+                        "plan": "free",
+                        "region": params["region"],
+                        "envSpecificDetails": {
+                            "dockerfilePath": "./Dockerfile",
+                            "dockerContext": ".",
+                        },
+                    },
+                }
+                req_create = urllib.request.Request(
+                    "https://api.render.com/v1/services",
+                    data=json.dumps(payload).encode("utf-8"),
+                    headers=headers,
+                    method="POST",
+                )
+                with _DIRECT_OPENER.open(req_create, timeout=30.0) as resp:
+                    created = json.loads(resp.read().decode("utf-8", errors="replace"))
+
+                svc = created.get("service", {})
+                svc_url = (svc.get("serviceDetails") or {}).get("url", "").strip()
+                dash_url = svc.get("dashboardUrl", "")
+                if not svc_url:
+                    raise RuntimeError(f"Service created, but URL missing. Dashboard: {dash_url}")
+
+                label = f"Render ({params['region']})"
+                self._pending_render_srv = (label, svc_url)
+                self.log(f"Render Deploy STARTED -> {svc_url} | Region: {params['region']} | Build takes ~2-3 min ({dash_url})")
+            except urllib.error.HTTPError as e:
+                err_body = e.read().decode("utf-8", errors="replace")[:260]
+                self.log(f"Render Deploy FAILED (HTTP {e.code}): {err_body}")
+            except Exception as e:
+                self.log(f"Render Deploy FAILED: {e}")
+            finally:
+                self._stop_busy(tid)
+
+        threading.Thread(target=worker, daemon=True).start()
+
     def add_server(self):
         dlg = EntryDialog(self, "Add Backend Server", "Server Name:", "Server URL (https://...):", f"Server {len(self.server_pool.servers) + 1}")
         if dlg.exec() == QDialog.Accepted:
@@ -3569,6 +3721,15 @@ class FreeDnetProWindow(QMainWindow):
         if self._tun_ui_dirty:
             self._tun_ui_dirty = False
             self._update_tun_btn_ui()
+
+        if self._pending_render_srv is not None:
+            srv_name, srv_url = self._pending_render_srv
+            self._pending_render_srv = None
+            with self.server_pool.lock:
+                self.server_pool.servers.append(BackendServer(srv_name, srv_url, True))
+            self._refresh_target_dropdown()
+            self._save_config()
+            self._sync_tables()
 
         if self._pending_ip_info is not None:
             ip, loc, isp = self._pending_ip_info
