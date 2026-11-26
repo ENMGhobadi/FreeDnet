@@ -1,8 +1,12 @@
 """Responsive FlowLayout and deployment/entry dialogs for FreeDnet."""
 
 import time
+
+from fd_config import list_running_windows_apps
 from PySide6.QtCore import QPoint, QRect, QSize, Qt, QTimer
 from PySide6.QtWidgets import (
+    QAbstractItemView,
+    QCheckBox,
     QComboBox,
     QDialog,
     QDialogButtonBox,
@@ -13,7 +17,9 @@ from PySide6.QtWidgets import (
     QLayout,
     QLineEdit,
     QMessageBox,
+    QHeaderView,
     QPushButton,
+    QTableWidget,
     QVBoxLayout,
 )
 
@@ -389,3 +395,131 @@ class ToastBanner(QFrame):
         x = 20 if p.layoutDirection() == Qt.RightToLeft else max(20, p.width() - self.width() - 20)
         y = max(20, p.height() - self.height() - 20)
         self.move(x, y)
+
+
+class AppRoutingDialog(QDialog):
+    """Per-application backend server routing rules for Windows TUN Mode."""
+
+    DIRECT_TOKEN = "__DIRECT__"
+
+    def __init__(
+        self,
+        parent,
+        enabled: bool,
+        routes: list[dict],
+        server_names: list[str],
+        tr=None,
+    ):
+        super().__init__(parent)
+        self._tr = tr or (lambda k: k)
+        self._server_names = list(server_names)
+        self._running_apps = list_running_windows_apps()
+
+        self.setWindowTitle(self._tr("app_routing_title"))
+        self.setMinimumSize(620, 440)
+        lay = QVBoxLayout(self)
+        lay.setSpacing(12)
+
+        top = QHBoxLayout()
+        self.chk_enable = QCheckBox(self._tr("app_routing_enable"))
+        self.chk_enable.setChecked(bool(enabled))
+        top.addWidget(self.chk_enable)
+        top.addStretch()
+
+        self.refresh_btn = QPushButton(self._tr("app_routing_refresh"), objectName="SmallBtn")
+        self.refresh_btn.clicked.connect(self._refresh_apps)
+        self.add_btn = QPushButton(self._tr("app_routing_add"), objectName="PrimaryBtn")
+        self.add_btn.clicked.connect(lambda: self._add_row())
+        self.rem_btn = QPushButton(self._tr("remove_btn"), objectName="SmallBtn")
+        self.rem_btn.clicked.connect(self._remove_selected)
+        top.addWidget(self.refresh_btn)
+        top.addWidget(self.add_btn)
+        top.addWidget(self.rem_btn)
+        lay.addLayout(top)
+
+        hint = QLabel(self._tr("app_routing_hint"), objectName="Muted")
+        hint.setWordWrap(True)
+        lay.addWidget(hint)
+
+        self.table = QTableWidget(0, 2)
+        self.table.setHorizontalHeaderLabels(self._tr("app_routing_headers"))
+        self.table.setSelectionBehavior(QAbstractItemView.SelectRows)
+        self.table.setSelectionMode(QAbstractItemView.SingleSelection)
+        self.table.verticalHeader().setVisible(False)
+        hdr = self.table.horizontalHeader()
+        hdr.setSectionResizeMode(0, QHeaderView.Stretch)
+        hdr.setSectionResizeMode(1, QHeaderView.Stretch)
+        lay.addWidget(self.table, stretch=1)
+
+        for r in routes or []:
+            proc = (r.get("process") or "").strip()
+            srv = (r.get("server") or "").strip()
+            if proc and srv:
+                self._add_row(proc, srv)
+
+        buttons = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
+        buttons.accepted.connect(self.accept)
+        buttons.rejected.connect(self.reject)
+        lay.addWidget(buttons)
+
+    def _populate_app_combo(self, combo: QComboBox, selected: str = ""):
+        cur = selected or combo.currentText().strip()
+        combo.blockSignals(True)
+        combo.clear()
+        combo.addItems(self._running_apps)
+        if cur:
+            idx = combo.findText(cur, Qt.MatchFixedString)
+            if idx >= 0:
+                combo.setCurrentIndex(idx)
+            else:
+                combo.setEditText(cur)
+        combo.blockSignals(False)
+
+    def _refresh_apps(self):
+        self._running_apps = list_running_windows_apps()
+        for row in range(self.table.rowCount()):
+            cb = self.table.cellWidget(row, 0)
+            if isinstance(cb, QComboBox):
+                self._populate_app_combo(cb)
+
+    def _add_row(self, process: str = "", server: str = ""):
+        row = self.table.rowCount()
+        self.table.insertRow(row)
+        self.table.setRowHeight(row, 34)
+
+        app_cb = QComboBox()
+        app_cb.setEditable(True)
+        self._populate_app_combo(app_cb, process)
+        self.table.setCellWidget(row, 0, app_cb)
+
+        srv_cb = QComboBox()
+        for s in self._server_names:
+            srv_cb.addItem(s, s)
+        srv_cb.addItem("DIRECT (Bypass)", self.DIRECT_TOKEN)
+        if server:
+            idx = srv_cb.findData(server)
+            if idx < 0:
+                idx = srv_cb.findText(server)
+            if idx >= 0:
+                srv_cb.setCurrentIndex(idx)
+        self.table.setCellWidget(row, 1, srv_cb)
+
+    def _remove_selected(self):
+        row = self.table.currentRow()
+        if row >= 0:
+            self.table.removeRow(row)
+
+    def result_data(self) -> tuple[bool, list[dict]]:
+        routes = []
+        seen = set()
+        for row in range(self.table.rowCount()):
+            app_cb = self.table.cellWidget(row, 0)
+            srv_cb = self.table.cellWidget(row, 1)
+            if not isinstance(app_cb, QComboBox) or not isinstance(srv_cb, QComboBox):
+                continue
+            proc = app_cb.currentText().strip()
+            srv = srv_cb.currentData() or srv_cb.currentText().strip()
+            if proc and srv and proc.lower() not in seen:
+                seen.add(proc.lower())
+                routes.append({"process": proc, "server": srv})
+        return self.chk_enable.isChecked(), routes

@@ -2,7 +2,10 @@
 
 import ctypes
 import datetime
+import csv
+import io
 import os
+import subprocess
 import sys
 import urllib.parse
 
@@ -118,6 +121,8 @@ DEFAULT_CONFIG = {
     "keep_awake": True,
     "chain_enabled": False,
     "chain_uri": "",
+    "app_routing_enabled": False,
+    "app_routes": [],
     "theme": "Obsidian Slate (Default)",
     "language": "English",
     "accounts": [],
@@ -227,3 +232,41 @@ def normalize_tunnel_url(raw_url: str) -> str:
     if not trimmed:
         return ""
     return trimmed if trimmed.endswith("/tunnel") else f"{trimmed}/tunnel"
+
+
+_SYSTEM_PROCS = {
+    "system", "system idle process", "registry", "memory compression",
+    "smss.exe", "csrss.exe", "wininit.exe", "services.exe", "lsass.exe",
+    "svchost.exe", "fontdrvhost.exe", "dwm.exe", "conhost.exe",
+    "sihost.exe", "taskhostw.exe", "ctfmon.exe", "dllhost.exe",
+    "wudfhost.exe", "runtimebroker.exe", "searchindexer.exe",
+    "freednet.exe", "xray.exe",
+}
+
+
+def list_running_windows_apps() -> list[str]:
+    """Return sorted unique executable names of currently running user apps on Windows."""
+    apps: set[str] = set()
+    if sys.platform == "win32":
+        try:
+            flags = getattr(subprocess, "CREATE_NO_WINDOW", 0x08000000)
+            res = subprocess.run(
+                ["tasklist", "/FO", "CSV", "/NH"],
+                capture_output=True,
+                text=True,
+                timeout=5,
+                creationflags=flags,
+            )
+            if res.returncode == 0 and res.stdout:
+                reader = csv.reader(io.StringIO(res.stdout))
+                for row in reader:
+                    if not row:
+                        continue
+                    exe = row[0].strip()
+                    if exe and exe.lower().endswith(".exe") and exe.lower() not in _SYSTEM_PROCS:
+                        apps.add(exe)
+        except Exception:
+            pass
+    for common in ("chrome.exe", "msedge.exe", "firefox.exe", "brave.exe", "telegram.exe", "discord.exe"):
+        apps.add(common)
+    return sorted(apps, key=lambda x: x.lower())
