@@ -74,6 +74,7 @@ from fd_dialogs import (
     FlowLayout,
     RenderDeployDialog,
     SnapDeployDialog,
+    ToastBanner,
 )
 from fd_i18n import LANGUAGES
 from fd_net import (
@@ -136,6 +137,7 @@ class FreeDnetProWindow(QMainWindow):
         self.tun_active = False
         self.sys_proxy_active = False
         self.log_queue: queue.Queue[str] = queue.Queue()
+        self._toast_queue: queue.Queue[tuple[str, str, int]] = queue.Queue()
         self._last_save_ts = time.time()
         self._last_stat_ts = time.time()
         self._prev_tx = 0
@@ -150,6 +152,7 @@ class FreeDnetProWindow(QMainWindow):
         if os.path.exists(icon_path):
             self.setWindowIcon(QIcon(icon_path))
         self._build_ui()
+        self.toast = ToastBanner(self)
         self._setup_tray(icon_path)
         if self._config_load_err:
             self.log(self._config_load_err)
@@ -290,6 +293,14 @@ class FreeDnetProWindow(QMainWindow):
         ts = time.strftime("%H:%M:%S")
         self.log_queue.put(f"[{ts}] {msg}")
 
+    def notify(self, msg: str, level: str = "info", duration_ms: int = 4000):
+        self._toast_queue.put((level, msg, duration_ms))
+
+    def resizeEvent(self, event):
+        super().resizeEvent(event)
+        if hasattr(self, "toast") and self.toast.isVisible():
+            self.toast.reposition()
+
     def _build_ui(self):
         root = QWidget(objectName="Root")
         self.setCentralWidget(root)
@@ -344,7 +355,7 @@ class FreeDnetProWindow(QMainWindow):
         body.addWidget(self.tabs, stretch=1)
 
         # ==========================================================
-        # TAB 1: OVERVIEW (KPIs + Routing + Quick Diagnostics)
+        # TAB 1: OVERVIEW (KPIs + Routing)
         # ==========================================================
         ov_tab = QWidget()
         ov_lay = QVBoxLayout(ov_tab)
@@ -421,18 +432,7 @@ class FreeDnetProWindow(QMainWindow):
         r_lay.addLayout(r2_tiles)
         ov_lay.addWidget(route_card)
 
-        # Compact recent activity preview on Overview
-        ov_log_hdr = QHBoxLayout()
-        self.lbl_recent_act = QLabel("Recent Activity", objectName="FieldLabel")
-        ov_log_hdr.addWidget(self.lbl_recent_act)
-        ov_log_hdr.addStretch()
-        self.lbl_row_tip = QLabel("Tip: Right-click any account or server row for actions", objectName="Muted")
-        ov_log_hdr.addWidget(self.lbl_row_tip)
-        ov_lay.addLayout(ov_log_hdr)
-
-        self.ov_log_preview = QTextEdit(objectName="LogConsole")
-        self.ov_log_preview.setReadOnly(True)
-        ov_lay.addWidget(self.ov_log_preview, stretch=1)
+        ov_lay.addStretch(1)
         self.tabs.addTab(ov_tab, "Overview")
 
         # ==========================================================
@@ -680,7 +680,7 @@ class FreeDnetProWindow(QMainWindow):
         cpy_btn.clicked.connect(lambda: QApplication.clipboard().setText(self.log_console.toPlainText()))
         self.clr_btn = QPushButton("Clear", objectName="SmallBtn")
         clr_btn = self.clr_btn
-        clr_btn.clicked.connect(lambda: (self.log_console.clear(), self.ov_log_preview.clear()))
+        clr_btn.clicked.connect(self.log_console.clear)
         log_hdr.addWidget(cpy_btn)
         log_hdr.addWidget(clr_btn)
         set_lay.addLayout(log_hdr)
@@ -760,9 +760,11 @@ class FreeDnetProWindow(QMainWindow):
                 acc.last_latency_ms = lat
                 acc.last_error = ""
                 self.log(f"GAS Ping OK [{acc.name}]: {lat} ms")
+                self.notify(f"GAS Ping OK [{acc.name}]: {lat} ms", "success")
             else:
                 acc.last_error = res.get("error", "Error")
                 self.log(f"GAS Ping FAILED [{acc.name}]: {acc.last_error}")
+                self.notify(f"GAS Ping FAILED [{acc.name}]: {acc.last_error}", "error")
 
     def _ping_single_server(self, row: int):
         if not (0 <= row < len(self.server_pool.servers)):
@@ -793,6 +795,7 @@ class FreeDnetProWindow(QMainWindow):
                 if res.get("ok"):
                     self.server_pool.report_success(srv, lat)
                     self.log(f"Backend OK [{srv.name}]: {lat} ms (active: {res.get('activeSessions', 0)})")
+                    self.notify(f"Backend OK [{srv.name}]: {lat} ms", "success")
                     return
                 det = str(res.get("detail") or "")
                 if ("Waking up" in det or "503" in str(res.get("error", ""))) and attempt < 6:
@@ -801,6 +804,7 @@ class FreeDnetProWindow(QMainWindow):
                     continue
                 self.server_pool.report_failure(srv, res.get("error", "Error"))
                 self.log(f"Backend FAILED [{srv.name}]: {res.get('error')}")
+                self.notify(f"Backend FAILED [{srv.name}]: {res.get('error')}", "error")
                 return
 
     def _make_kpi_card_ex(self, parent_layout, title: str, initial: str) -> tuple[QLabel, QLabel]:
@@ -963,8 +967,6 @@ class FreeDnetProWindow(QMainWindow):
         self.install_ca_btn.setText(self._t("install_ca"))
         if self.ip_badge.text().startswith(("Exit IP: Not", "آی‌پی خروجی:", "出口 IP:", "IP de Salida:", "Ausgangs-IP:", "Выходной IP:", "출구 IP:")):
             self.ip_badge.setText(self._t("exit_ip_unset"))
-        self.lbl_recent_act.setText(self._t("recent_activity"))
-        self.lbl_row_tip.setText(self._t("row_tip"))
 
         self.chk_fair_share.setText(self._t("fair_share"))
         self.lbl_free_quota.setText(self._t("free_quota"))
@@ -1062,6 +1064,7 @@ class FreeDnetProWindow(QMainWindow):
             self._save_config()
             self._sync_tables()
             self.log(f"Added GAS account: {name}")
+            self.notify(f"Added GAS account: {name}", "success")
 
     def edit_account(self):
         row = self.gas_table.currentRow()
@@ -1198,18 +1201,23 @@ class FreeDnetProWindow(QMainWindow):
 
                 label = f"Render ({params['region']})"
                 self.log(f"Render Deploy STARTED -> {svc_url} | Waiting for build to go LIVE (~2-3 min)...")
+                self.notify(f"Render deploy started for {params['name']} — waiting to go LIVE...", "info")
                 lat = self._wait_until_server_live(tid, label, svc_url, params["auth_key"], max_attempts=30, interval_s=12.0)
                 if lat is not None:
                     self._pending_srv_queue.put((label, svc_url, lat))
                     self.log(f"✅ {label} is LIVE & READY ({lat} ms) -> {svc_url} | Added to Backend Servers.")
+                    self.notify(f"{label} is LIVE & READY ({lat} ms)!", "success")
                 else:
                     self._pending_srv_queue.put((label, svc_url, 0))
                     self.log(f"⚠️ {label} still building -> {svc_url} | Added to Backend Servers (Ping in a moment).")
+                    self.notify(f"{label} added (still building — check Ping soon)", "warning")
             except urllib.error.HTTPError as e:
                 err_body = e.read().decode("utf-8", errors="replace")[:260]
                 self.log(f"Render Deploy FAILED (HTTP {e.code}): {err_body}")
+                self.notify(f"Render Deploy FAILED (HTTP {e.code})", "error")
             except Exception as e:
                 self.log(f"Render Deploy FAILED: {e}")
+                self.notify(f"Render Deploy FAILED: {e}", "error")
             finally:
                 self._stop_busy(tid)
 
@@ -1252,18 +1260,23 @@ class FreeDnetProWindow(QMainWindow):
 
                 label = f"SnapDeploy ({params['name']})"
                 self.log(f"SnapDeploy STARTED -> {svc_url} | Waiting for build to go LIVE (~2-5 min)...")
+                self.notify(f"SnapDeploy started for {params['name']} — waiting to go LIVE...", "info")
                 lat = self._wait_until_server_live(tid, label, svc_url, params["auth_key"], max_attempts=30, interval_s=12.0)
                 if lat is not None:
                     self._pending_srv_queue.put((label, svc_url, lat))
                     self.log(f"✅ {label} is LIVE & READY ({lat} ms) -> {svc_url} | Added to Backend Servers.")
+                    self.notify(f"{label} is LIVE & READY ({lat} ms)!", "success")
                 else:
                     self._pending_srv_queue.put((label, svc_url, 0))
                     self.log(f"⚠️ {label} still building -> {svc_url} | Added to Backend Servers (Ping in a moment).")
+                    self.notify(f"{label} added (still building — check Ping soon)", "warning")
             except urllib.error.HTTPError as e:
                 err_body = e.read().decode("utf-8", errors="replace")[:260]
                 self.log(f"SnapDeploy FAILED (HTTP {e.code}): {err_body}")
+                self.notify(f"SnapDeploy FAILED (HTTP {e.code})", "error")
             except Exception as e:
                 self.log(f"SnapDeploy FAILED: {e}")
+                self.notify(f"SnapDeploy FAILED: {e}", "error")
             finally:
                 self._stop_busy(tid)
 
@@ -1380,18 +1393,23 @@ class FreeDnetProWindow(QMainWindow):
                 worker_url = f"https://{name}.{subdomain}.workers.dev"
                 label = f"Cloudflare ({name})"
                 self.log(f"Cloudflare uploaded -> {worker_url} | Verifying LIVE status...")
+                self.notify(f"Cloudflare uploaded — verifying LIVE status...", "info")
                 lat = self._wait_until_server_live(tid, label, worker_url, params["auth_key"], max_attempts=8, interval_s=3.0)
                 if lat is not None:
                     self._pending_srv_queue.put((label, worker_url, lat))
                     self.log(f"✅ {label} is LIVE & READY ({lat} ms) -> {worker_url} | Added to Backend Servers.")
+                    self.notify(f"{label} is LIVE & READY ({lat} ms)!", "success")
                 else:
                     self._pending_srv_queue.put((label, worker_url, 0))
                     self.log(f"⚠️ {label} deployed -> {worker_url} | Added to Backend Servers (check Ping).")
+                    self.notify(f"{label} deployed (verify with Ping)", "warning")
             except urllib.error.HTTPError as e:
                 err_body = e.read().decode("utf-8", errors="replace")[:260]
                 self.log(f"Cloudflare Deploy FAILED (HTTP {e.code}): {err_body}")
+                self.notify(f"Cloudflare Deploy FAILED (HTTP {e.code})", "error")
             except Exception as e:
                 self.log(f"Cloudflare Deploy FAILED: {e}")
+                self.notify(f"Cloudflare Deploy FAILED: {e}", "error")
             finally:
                 self._stop_busy(tid)
 
@@ -1407,6 +1425,7 @@ class FreeDnetProWindow(QMainWindow):
             self._save_config()
             self._sync_tables()
             self.log(f"Added backend server: {name} ({url})")
+            self.notify(f"Added backend server: {name}", "success")
 
     def edit_server(self):
         row = self.srv_table.currentRow()
@@ -1512,6 +1531,9 @@ class FreeDnetProWindow(QMainWindow):
                         self.server_pool.report_failure(srv, res.get("error", "Error"))
                         self.log(f"Direct Ping FAILED [{srv.name}]: {res.get('error')}")
                         break
+        ok_cnt = sum(1 for s in self.server_pool.servers if not s.last_error)
+        tot_cnt = len(self.server_pool.servers)
+        self.notify(f"Direct Ping: {ok_cnt}/{tot_cnt} servers ready", "success" if ok_cnt == tot_cnt else "warning")
 
     def _run_ping_all_gas(self, auth_key):
         if True:
@@ -1552,6 +1574,10 @@ class FreeDnetProWindow(QMainWindow):
                         self.log(f"Backend FAILED [{srv.name}]: {res.get('error')}")
                         break
 
+        g_ok = sum(1 for a in self.pool.accounts if not a.last_error)
+        g_tot = len(self.pool.accounts)
+        self.notify(f"Ping Complete: {g_ok}/{g_tot} GAS relays ready", "success" if g_ok == g_tot else "warning")
+
     def test_proxy_e2e(self):
         if not (self.proxy and self.proxy.running):
             QMessageBox.information(self, "Proxy Stopped", "Click 'Start Proxy' first.")
@@ -1578,8 +1604,10 @@ class FreeDnetProWindow(QMainWindow):
                 lat = int((time.time() - t0) * 1000)
                 first_line = resp.decode("latin-1", errors="replace").split("\r\n")[0]
                 self.log(f"E2E Proxy Test OK via {host}:{port} -> {first_line} ({lat} ms)")
+                self.notify(f"E2E Proxy OK ({lat} ms): {first_line}", "success")
             except Exception as e:
                 self.log(f"E2E Proxy Test FAILED -> {e}")
+                self.notify(f"E2E Proxy FAILED: {e}", "error")
             finally:
                 self._stop_busy(tid)
 
@@ -1721,11 +1749,13 @@ class FreeDnetProWindow(QMainWindow):
                     if city:
                         loc = f"{loc} - {city}"
                     self.log(f"Country Check OK [{name}]: IP={ip} | {loc} | {isp}")
+                    self.notify(f"Exit IP: {ip} ({loc})", "success")
                     self._pending_ip_info = (str(ip), str(loc), str(isp or "-"))
                     return
                 except Exception as e:
                     self.log(f"Country Check [{name}] failed ({e}), trying next...")
             self.log("Country Check FAILED: All IP lookup services timed out.")
+            self.notify("Country Check FAILED: All IP lookup services timed out.", "error")
 
     def _download_with_fallback(self, url: str, timeout: float = 35.0) -> bytes:
         req = urllib.request.Request(url, headers={"User-Agent": "FreeDnet-Client/2.0"})
@@ -1957,9 +1987,11 @@ class FreeDnetProWindow(QMainWindow):
                     raise RuntimeError(err_line or "xray.exe exited unexpectedly (check Admin rights / Wintun)")
                 self.tun_active = True
                 self.log("Xray TUN Mode ACTIVE -> Virtual adapter 'FreeDnetTUN' created (visible in Control Panel & Task Manager).")
+                self.notify("Xray TUN Mode ACTIVE (FreeDnetTUN)", "success")
             except Exception as e:
                 self.tun_active = False
                 self.log(f"TUN Mode FAILED -> {e}")
+                self.notify(f"TUN Mode FAILED: {e}", "error")
             finally:
                 self._stop_busy(tid)
                 self._tun_ui_dirty = True
@@ -2034,14 +2066,19 @@ class FreeDnetProWindow(QMainWindow):
         if lines:
             for ln in lines:
                 self.log_console.append(ln)
-                self.ov_log_preview.append(ln)
-            for box, max_b, keep_b in ((self.log_console, 500, 400), (self.ov_log_preview, 120, 80)):
-                doc = box.document()
-                if doc.blockCount() > max_b:
-                    cursor = box.textCursor()
-                    cursor.movePosition(cursor.Start)
-                    cursor.movePosition(cursor.Down, cursor.KeepAnchor, doc.blockCount() - keep_b)
-                    cursor.removeSelectedText()
+            doc = self.log_console.document()
+            if doc.blockCount() > 500:
+                cursor = self.log_console.textCursor()
+                cursor.movePosition(cursor.Start)
+                cursor.movePosition(cursor.Down, cursor.KeepAnchor, doc.blockCount() - 400)
+                cursor.removeSelectedText()
+
+        while True:
+            try:
+                t_lvl, t_msg, t_dur = self._toast_queue.get_nowait()
+            except queue.Empty:
+                break
+            self.toast.show_toast(t_msg, level=t_lvl, duration_ms=t_dur)
 
         self._sync_tables()
         now = time.time()

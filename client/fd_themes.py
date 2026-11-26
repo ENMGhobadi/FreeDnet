@@ -474,4 +474,34 @@ QDialog, QMessageBox {{
 QDialog QLabel, QMessageBox QLabel {{
     color: {t["text"]};
 }}
+QFrame#ToastInfo, QFrame#ToastSuccess, QFrame#ToastWarning, QFrame#ToastError {{
+    background-color: {t["card"]};
+    border: 1.5px solid {t["accent1"]};
+    border-radius: 10px;
+}}
+QFrame#ToastSuccess {{
+    border-color: #10b981;
+}}
+QFrame#ToastWarning {{
+    border-color: #f59e0b;
+}}
+QFrame#ToastError {{
+    border-color: #ef4444;
+}}
+QLabel#ToastText {{
+    color: {t["text"]};
+    font-size: 12.5px;
+    font-weight: 600;
+}}
+QPushButton#ToastClose {{
+    background-color: transparent;
+    border: none;
+    color: {t["muted"]};
+    font-size: 14px;
+    font-weight: 700;
+    padding: 2px 6px;
+}}
+QPushButton#ToastClose:hover {{
+    color: {t["title"]};
+}}
 """

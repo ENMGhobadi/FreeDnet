@@ -1,16 +1,19 @@
 """Responsive FlowLayout and deployment/entry dialogs for FreeDnet."""
 
 import time
-from PySide6.QtCore import QPoint, QRect, QSize, Qt
+from PySide6.QtCore import QPoint, QRect, QSize, Qt, QTimer
 from PySide6.QtWidgets import (
     QComboBox,
     QDialog,
     QDialogButtonBox,
     QFormLayout,
+    QFrame,
+    QHBoxLayout,
     QLabel,
     QLayout,
     QLineEdit,
     QMessageBox,
+    QPushButton,
     QVBoxLayout,
 )
 
@@ -322,3 +325,67 @@ class CloudflareDeployDialog(QDialog):
             "location_label": self.loc_combo.currentText(),
             "auth_key": self.auth_edit.text().strip() or "change-me-freednet-key",
         }
+
+
+class ToastBanner(QFrame):
+    """Floating 4-second auto-dismiss notification banner."""
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setObjectName("ToastInfo")
+        self.setVisible(False)
+        self.setMaximumWidth(460)
+        self.setMinimumWidth(260)
+
+        lay = QHBoxLayout(self)
+        lay.setContentsMargins(14, 10, 10, 10)
+        lay.setSpacing(10)
+
+        self.icon_lbl = QLabel("ℹ️")
+        self.icon_lbl.setFixedWidth(20)
+        lay.addWidget(self.icon_lbl, alignment=Qt.AlignTop)
+
+        self.msg_lbl = QLabel("", objectName="ToastText")
+        self.msg_lbl.setWordWrap(True)
+        lay.addWidget(self.msg_lbl, stretch=1)
+
+        self.close_btn = QPushButton("✕", objectName="ToastClose")
+        self.close_btn.setFixedSize(24, 24)
+        self.close_btn.clicked.connect(self.hide)
+        lay.addWidget(self.close_btn, alignment=Qt.AlignTop)
+
+        self._timer = QTimer(self)
+        self._timer.setSingleShot(True)
+        self._timer.timeout.connect(self.hide)
+
+    def show_toast(self, message: str, level: str = "info", duration_ms: int = 4000):
+        icons = {"success": "✅", "error": "❌", "warning": "⚠️", "info": "ℹ️"}
+        obj_names = {
+            "success": "ToastSuccess",
+            "error": "ToastError",
+            "warning": "ToastWarning",
+            "info": "ToastInfo",
+        }
+        self.icon_lbl.setText(icons.get(level, "ℹ️"))
+        self.msg_lbl.setText(message)
+        self.setObjectName(obj_names.get(level, "ToastInfo"))
+        self.style().unpolish(self)
+        self.style().polish(self)
+        self.adjustSize()
+        self.reposition()
+        self.show()
+        self.raise_()
+        self._timer.start(max(1000, int(duration_ms)))
+
+    def reposition(self):
+        p = self.parentWidget()
+        if p is None:
+            return
+        self.adjustSize()
+        sz = self.sizeHint()
+        w = min(max(sz.width(), 280), max(280, p.width() - 40))
+        h = self.heightForWidth(w) if self.hasHeightForWidth() else sz.height()
+        self.resize(w, max(h, sz.height()))
+        x = 20 if p.layoutDirection() == Qt.RightToLeft else max(20, p.width() - self.width() - 20)
+        y = max(20, p.height() - self.height() - 20)
+        self.move(x, y)
