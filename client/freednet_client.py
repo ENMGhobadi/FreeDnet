@@ -4,6 +4,7 @@ FreeDnet Client (Windows 11 Next-Gen PySide6 / Qt 6 Dark Fluent UI + SOCKS5/HTTP
 - Modular architecture: fd_config, fd_net, fd_proxy, fd_themes, fd_i18n, fd_dialogs
 """
 
+import ctypes
 import io
 import json
 import os
@@ -1637,9 +1638,11 @@ class FreeDnetProWindow(QMainWindow):
 
         mode = "direct" if self.rb_direct.isChecked() else "gas"
         if mode == "gas" and not any(a.enabled for a in self.pool.accounts):
+            self.notify("No active GAS accounts enabled. Enable one or switch to Direct mode.", "warning", 6000)
             QMessageBox.warning(self, "No Active GAS Accounts", "Enable at least one GAS account or switch to Direct mode.")
             return
         if mode == "direct" and not any(s.enabled for s in self.server_pool.servers):
+            self.notify("No active Backend Servers enabled for Direct mode.", "warning", 6000)
             QMessageBox.warning(self, "No Active Servers", "Enable at least one Backend Server for Direct mode.")
             return
 
@@ -1672,6 +1675,7 @@ class FreeDnetProWindow(QMainWindow):
             self.start_btn.style().unpolish(self.start_btn)
             self.start_btn.style().polish(self.start_btn)
         except Exception as e:
+            self.notify(f"Proxy Start Failed: {e}", "error", 6000)
             QMessageBox.critical(self, "Start Failed", str(e))
             self.proxy = None
 
@@ -1926,20 +1930,28 @@ class FreeDnetProWindow(QMainWindow):
             return
 
         if not is_windows_admin():
+            self.notify("TUN Mode requires Administrator privileges.", "warning", 5000)
             res = QMessageBox.question(
                 self,
                 "Administrator Required",
                 "Creating the FreeDnetTUN virtual network adapter requires Administrator privileges.\nRestart FreeDnet as Administrator and auto-start TUN now?",
             )
             if res == QMessageBox.Yes:
-                launch_arg = "--auto-tun" if getattr(sys, "frozen", False) else f'"{os.path.abspath(__file__)}" --auto-tun'
-                ctypes.windll.shell32.ShellExecuteW(None, "runas", sys.executable, launch_arg, BASE_DIR, 1)
-                self._quit_app()
+                try:
+                    launch_arg = "--auto-tun" if getattr(sys, "frozen", False) else f'"{os.path.abspath(__file__)}" --auto-tun'
+                    rc = ctypes.windll.shell32.ShellExecuteW(None, "runas", sys.executable, launch_arg, BASE_DIR, 1)
+                    if rc <= 32:
+                        self.notify(f"Admin elevation cancelled or failed (code {rc}).", "error", 6000)
+                        return
+                    self._quit_app()
+                except Exception as e:
+                    self.notify(f"Admin restart failed: {e}", "error", 6000)
             return
 
         self._save_config()
         if self.config.get("chain_enabled"):
             if self.config.get("proxy_mode", "tcp") == "mitm":
+                self.notify("Outbound Chain requires TCP Tunnel mode (not HTTP MITM).", "warning", 6000)
                 QMessageBox.warning(
                     self,
                     "Outbound Chain",
@@ -1949,6 +1961,7 @@ class FreeDnetProWindow(QMainWindow):
             try:
                 parse_chain_uri(self.config.get("chain_uri", ""))
             except Exception as e:
+                self.notify(f"Invalid Outbound Chain URI: {e}", "error", 6000)
                 QMessageBox.warning(self, "Outbound Chain", f"Invalid VLESS/Trojan URI:\n{e}")
                 return
 
@@ -1959,6 +1972,7 @@ class FreeDnetProWindow(QMainWindow):
 
         self.tun_btn.setEnabled(False)
         self.tun_btn.setText(self._t("tun_starting"))
+        self.notify("Starting Xray TUN Mode...", "info", 4000)
 
         def worker():
             tid = self._start_busy("Preparing Xray TUN & Wintun...")
@@ -1991,7 +2005,7 @@ class FreeDnetProWindow(QMainWindow):
             except Exception as e:
                 self.tun_active = False
                 self.log(f"TUN Mode FAILED -> {e}")
-                self.notify(f"TUN Mode FAILED: {e}", "error")
+                self.notify(f"TUN Mode FAILED: {e}", "error", 7000)
             finally:
                 self._stop_busy(tid)
                 self._tun_ui_dirty = True
@@ -2117,6 +2131,20 @@ class FreeDnetProWindow(QMainWindow):
             self._speed_rx_ema = 0.0
             self.kpi_tunnels.setText("0")
             self.kpi_speed.setText("0 B/s  |  0 B/s")
+
+        if self.tun_active and self.xray_proc is not None and self.xray_proc.poll() is not None:
+            out = ""
+            try:
+                out, _ = self.xray_proc.communicate(timeout=1)
+            except Exception:
+                pass
+            err_line = " | ".join(ln.strip() for ln in out.splitlines() if ln.strip())[-220:]
+            self.xray_proc = None
+            self.tun_active = False
+            self._update_tun_btn_ui()
+            msg = err_line or "xray.exe exited unexpectedly"
+            self.log(f"TUN Mode stopped unexpectedly -> {msg}")
+            self.notify(f"TUN Mode FAILED: {msg}", "error", 7000)
 
         if self._tun_ui_dirty:
             self._tun_ui_dirty = False
