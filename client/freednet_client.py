@@ -114,7 +114,8 @@ def set_windows_system_proxy(enable: bool, host: str = "127.0.0.1", port: int = 
             if enable:
                 winreg.SetValueEx(key, "ProxyServer", 0, winreg.REG_SZ, f"{host}:{port}")
                 winreg.SetValueEx(key, "ProxyOverride", 0, winreg.REG_SZ, "localhost;127.*;10.*;172.16.*;192.168.*;<local>")
-                winreg.SetValueEx(key, "ProxyEnable", 0, winreg.REG_DWORD, 1)
+                wininet_val = 1
+                winreg.SetValueEx(key, "ProxyEnable", 0, winreg.REG_DWORD, wininet_val)
             else:
                 winreg.SetValueEx(key, "ProxyEnable", 0, winreg.REG_DWORD, 0)
         wininet = ctypes.windll.wininet
@@ -142,6 +143,7 @@ DEFAULT_CONFIG = {
     "server_mode": "priority", # "priority" (#1 -> #2), "fair" (1/N), or "only:<name>"
     "quota_preset": DEFAULT_PRESET,
     "keep_awake": True,
+    "theme": "Midnight Dark (Default)",
     "accounts": [],
     "servers": [],
 }
@@ -1102,232 +1104,411 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-PRO_QSS = """
-QMainWindow, QWidget#Root {
-    background-color: #090d16;
-    color: #e2e8f0;
+THEMES = {
+    "Midnight Dark (Default)": {
+        "is_light": False,
+        "bg": "#090d16",
+        "header": "#0d1322",
+        "card": "#111827",
+        "kpi": "#0f172a",
+        "toolbar": "#0d1424",
+        "input": "#0b1120",
+        "console": "#050811",
+        "border": "#1e293b",
+        "input_border": "#293548",
+        "text": "#e2e8f0",
+        "title": "#ffffff",
+        "muted": "#94a3b8",
+        "label": "#cbd5e1",
+        "accent1": "#2563eb",
+        "accent2": "#0284c7",
+        "accent_hover1": "#1d4ed8",
+        "accent_hover2": "#0369a1",
+        "accent_light": "#60a5fa",
+        "badge_bg": "#1d4ed8",
+        "badge_fg": "#dbeafe",
+        "btn_bg": "#1e293b",
+        "btn_hover": "#283548",
+        "btn_border": "#334155",
+        "sel_bg": "#1e3a8a",
+        "alt_row": "#0f172a",
+        "hdr_bg": "#131c31",
+        "pill_stop_bg": "#2a1218",
+        "pill_stop_fg": "#f87171",
+        "pill_stop_bd": "#7f1d1d",
+        "pill_run_bg": "#052e1c",
+        "pill_run_fg": "#34d399",
+        "pill_run_bd": "#065f46",
+    },
+    "Slate Blue & Cool Gray": {
+        "is_light": False,
+        "bg": "#2b3340",
+        "header": "#232a35",
+        "card": "#333d4b",
+        "kpi": "#2d3644",
+        "toolbar": "#27303d",
+        "input": "#252d39",
+        "console": "#1f2630",
+        "border": "#434f61",
+        "input_border": "#4e5c70",
+        "text": "#eef2f7",
+        "title": "#ffffff",
+        "muted": "#b4c0d0",
+        "label": "#dce4ef",
+        "accent1": "#3b82f6",
+        "accent2": "#0ea5e9",
+        "accent_hover1": "#2563eb",
+        "accent_hover2": "#0284c7",
+        "accent_light": "#7dd3fc",
+        "badge_bg": "#2563eb",
+        "badge_fg": "#eff6ff",
+        "btn_bg": "#3b4656",
+        "btn_hover": "#475468",
+        "btn_border": "#56657c",
+        "sel_bg": "#2563eb",
+        "alt_row": "#2f3846",
+        "hdr_bg": "#262e3a",
+        "pill_stop_bg": "#442229",
+        "pill_stop_fg": "#fca5a5",
+        "pill_stop_bd": "#991b1b",
+        "pill_run_bg": "#153d30",
+        "pill_run_fg": "#6ee7b7",
+        "pill_run_bd": "#059669",
+    },
+    "Obsidian Orange & Black": {
+        "is_light": False,
+        "bg": "#09090b",
+        "header": "#0f0f12",
+        "card": "#141418",
+        "kpi": "#111115",
+        "toolbar": "#101014",
+        "input": "#0c0c0f",
+        "console": "#060608",
+        "border": "#27272a",
+        "input_border": "#3f3f46",
+        "text": "#f4f4f5",
+        "title": "#ffffff",
+        "muted": "#a1a1aa",
+        "label": "#e4e4e7",
+        "accent1": "#f97316",
+        "accent2": "#ea580c",
+        "accent_hover1": "#ea580c",
+        "accent_hover2": "#c2410c",
+        "accent_light": "#fb923c",
+        "badge_bg": "#c2410c",
+        "badge_fg": "#ffedd5",
+        "btn_bg": "#1f1f24",
+        "btn_hover": "#2c2c33",
+        "btn_border": "#3f3f46",
+        "sel_bg": "#9a3412",
+        "alt_row": "#111115",
+        "hdr_bg": "#18181d",
+        "pill_stop_bg": "#2c1215",
+        "pill_stop_fg": "#f87171",
+        "pill_stop_bd": "#7f1d1d",
+        "pill_run_bg": "#0a2e1d",
+        "pill_run_fg": "#34d399",
+        "pill_run_bd": "#065f46",
+    },
+    "Emerald & Slate Gray": {
+        "is_light": False,
+        "bg": "#212826",
+        "header": "#1a201e",
+        "card": "#29322f",
+        "kpi": "#242c2a",
+        "toolbar": "#1e2523",
+        "input": "#1c2220",
+        "console": "#161b19",
+        "border": "#384440",
+        "input_border": "#465550",
+        "text": "#e7f0ec",
+        "title": "#ffffff",
+        "muted": "#9fb3ac",
+        "label": "#d2e0db",
+        "accent1": "#10b981",
+        "accent2": "#059669",
+        "accent_hover1": "#059669",
+        "accent_hover2": "#047857",
+        "accent_light": "#34d399",
+        "badge_bg": "#047857",
+        "badge_fg": "#d1fae5",
+        "btn_bg": "#313b38",
+        "btn_hover": "#3c4844",
+        "btn_border": "#4b5a55",
+        "sel_bg": "#065f46",
+        "alt_row": "#252d2b",
+        "hdr_bg": "#1e2523",
+        "pill_stop_bg": "#3b1c20",
+        "pill_stop_fg": "#fca5a5",
+        "pill_stop_bd": "#991b1b",
+        "pill_run_bg": "#0d3b2c",
+        "pill_run_fg": "#6ee7b7",
+        "pill_run_bd": "#059669",
+    },
+    "Warm Nescafe (Light)": {
+        "is_light": True,
+        "bg": "#f4ede4",
+        "header": "#ebe1d5",
+        "card": "#fcf8f3",
+        "kpi": "#f7f1e9",
+        "toolbar": "#efe6db",
+        "input": "#ffffff",
+        "console": "#faf5ee",
+        "border": "#ddd0c0",
+        "input_border": "#cbb9a4",
+        "text": "#2c2119",
+        "title": "#1f1610",
+        "muted": "#776252",
+        "label": "#4a382b",
+        "accent1": "#b5693c",
+        "accent2": "#965129",
+        "accent_hover1": "#9e572e",
+        "accent_hover2": "#7c4120",
+        "accent_light": "#8f4b25",
+        "badge_bg": "#965129",
+        "badge_fg": "#fff7ed",
+        "btn_bg": "#e7dbcc",
+        "btn_hover": "#dccbb8",
+        "btn_border": "#cbb79f",
+        "sel_bg": "#d6b89c",
+        "alt_row": "#f5ede3",
+        "hdr_bg": "#eadfd1",
+        "pill_stop_bg": "#fde8e8",
+        "pill_stop_fg": "#b91c1c",
+        "pill_stop_bd": "#fca5a5",
+        "pill_run_bg": "#dcfce7",
+        "pill_run_fg": "#15803d",
+        "pill_run_bd": "#86efac",
+    },
+}
+
+
+def build_qss(t: dict) -> str:
+    return f"""
+QMainWindow, QWidget#Root {{
+    background-color: {t["bg"]};
+    color: {t["text"]};
     font-family: "Segoe UI", "Inter", sans-serif;
     font-size: 13px;
-}
-QFrame#HeaderBar {
-    background-color: #0d1322;
-    border-bottom: 1px solid #1e293b;
-}
-QFrame#Card {
-    background-color: #111827;
-    border: 1px solid #1e293b;
+}}
+QFrame#HeaderBar {{
+    background-color: {t["header"]};
+    border-bottom: 1px solid {t["border"]};
+}}
+QFrame#Card {{
+    background-color: {t["card"]};
+    border: 1px solid {t["border"]};
     border-radius: 12px;
-}
-QFrame#KpiCard {
-    background-color: #0f172a;
-    border: 1px solid #1e293b;
+}}
+QFrame#KpiCard {{
+    background-color: {t["kpi"]};
+    border: 1px solid {t["border"]};
     border-radius: 10px;
-}
-QFrame#Toolbar {
-    background-color: #0d1424;
-    border: 1px solid #1e293b;
+}}
+QFrame#Toolbar {{
+    background-color: {t["toolbar"]};
+    border: 1px solid {t["border"]};
     border-radius: 8px;
-}
-QLabel#BrandTitle {
-    color: #ffffff;
+}}
+QLabel#BrandTitle {{
+    color: {t["title"]};
     font-size: 20px;
     font-weight: 700;
-}
-QLabel#ProBadge {
-    background-color: #1d4ed8;
-    color: #dbeafe;
+}}
+QLabel#ProBadge {{
+    background-color: {t["badge_bg"]};
+    color: {t["badge_fg"]};
     border-radius: 5px;
     padding: 2px 7px;
     font-size: 10px;
     font-weight: 700;
-}
-QLabel#Muted {
-    color: #94a3b8;
+}}
+QLabel#Muted {{
+    color: {t["muted"]};
     font-size: 12px;
-}
-QLabel#FieldLabel {
-    color: #cbd5e1;
+}}
+QLabel#FieldLabel {{
+    color: {t["label"]};
     font-weight: 600;
     font-size: 12px;
-}
-QLabel#KpiTitle {
-    color: #94a3b8;
+}}
+QLabel#KpiTitle {{
+    color: {t["muted"]};
     font-size: 11px;
     font-weight: 600;
-}
-QLabel#KpiValue {
-    color: #f8fafc;
+}}
+QLabel#KpiValue {{
+    color: {t["title"]};
     font-size: 16px;
     font-weight: 700;
-}
-QLabel#StatusPillStopped {
-    background-color: #2a1218;
-    color: #f87171;
-    border: 1px solid #7f1d1d;
+}}
+QLabel#StatusPillStopped {{
+    background-color: {t["pill_stop_bg"]};
+    color: {t["pill_stop_fg"]};
+    border: 1px solid {t["pill_stop_bd"]};
     border-radius: 12px;
     padding: 5px 12px;
     font-weight: 700;
     font-size: 12px;
-}
-QLabel#StatusPillRunning {
-    background-color: #052e1c;
-    color: #34d399;
-    border: 1px solid #065f46;
+}}
+QLabel#StatusPillRunning {{
+    background-color: {t["pill_run_bg"]};
+    color: {t["pill_run_fg"]};
+    border: 1px solid {t["pill_run_bd"]};
     border-radius: 12px;
     padding: 5px 12px;
     font-weight: 700;
     font-size: 12px;
-}
-QLineEdit, QComboBox {
-    background-color: #0b1120;
-    color: #f1f5f9;
-    border: 1px solid #293548;
+}}
+QLineEdit, QComboBox {{
+    background-color: {t["input"]};
+    color: {t["text"]};
+    border: 1px solid {t["input_border"]};
     border-radius: 7px;
     padding: 6px 10px;
-    selection-background-color: #2563eb;
-}
-QLineEdit:focus, QComboBox:focus {
-    border: 1px solid #3b82f6;
-}
-QComboBox::drop-down {
+    selection-background-color: {t["accent1"]};
+}}
+QLineEdit:focus, QComboBox:focus {{
+    border: 1px solid {t["accent_light"]};
+}}
+QComboBox::drop-down {{
     border: none;
     width: 24px;
-}
-QComboBox QAbstractItemView {
-    background-color: #0f172a;
-    color: #f1f5f9;
-    border: 1px solid #334155;
-    selection-background-color: #2563eb;
-}
-QPushButton {
-    background-color: #1e293b;
-    color: #e2e8f0;
-    border: 1px solid #334155;
+}}
+QComboBox QAbstractItemView {{
+    background-color: {t["card"]};
+    color: {t["text"]};
+    border: 1px solid {t["btn_border"]};
+    selection-background-color: {t["accent1"]};
+}}
+QPushButton {{
+    background-color: {t["btn_bg"]};
+    color: {t["text"]};
+    border: 1px solid {t["btn_border"]};
     border-radius: 8px;
     padding: 7px 14px;
     font-weight: 600;
-}
-QPushButton:hover {
-    background-color: #283548;
-    border-color: #475569;
-}
-QPushButton#PrimaryBtn {
-    background: qlineargradient(x1:0, y1:0, x2:1, y2:0, stop:0 #2563eb, stop:1 #0284c7);
+}}
+QPushButton:hover {{
+    background-color: {t["btn_hover"]};
+    border-color: {t["accent_light"]};
+}}
+QPushButton#PrimaryBtn {{
+    background: qlineargradient(x1:0, y1:0, x2:1, y2:0, stop:0 {t["accent1"]}, stop:1 {t["accent2"]});
     color: #ffffff;
     border: none;
     padding: 8px 18px;
     font-weight: 700;
-}
-QPushButton#PrimaryBtn:hover {
-    background: qlineargradient(x1:0, y1:0, x2:1, y2:0, stop:0 #1d4ed8, stop:1 #0369a1);
-}
-QPushButton#DangerBtn {
+}}
+QPushButton#PrimaryBtn:hover {{
+    background: qlineargradient(x1:0, y1:0, x2:1, y2:0, stop:0 {t["accent_hover1"]}, stop:1 {t["accent_hover2"]});
+}}
+QPushButton#DangerBtn {{
     background: qlineargradient(x1:0, y1:0, x2:1, y2:0, stop:0 #dc2626, stop:1 #b91c1c);
     color: #ffffff;
     border: none;
     padding: 8px 18px;
     font-weight: 700;
-}
-QPushButton#DangerBtn:hover {
+}}
+QPushButton#DangerBtn:hover {{
     background-color: #991b1b;
-}
-QPushButton#SmallBtn {
+}}
+QPushButton#SmallBtn {{
     padding: 5px 10px;
     font-size: 12px;
     border-radius: 6px;
-}
-QRadioButton, QCheckBox {
-    color: #e2e8f0;
+}}
+QRadioButton, QCheckBox {{
+    color: {t["text"]};
     spacing: 7px;
     font-weight: 500;
-}
-QTabWidget::pane {
-    border: 1px solid #1e293b;
+}}
+QTabWidget::pane {{
+    border: 1px solid {t["border"]};
     border-radius: 10px;
-    background-color: #111827;
+    background-color: {t["card"]};
     top: -1px;
-}
-QTabBar::tab {
-    background-color: #0d1322;
-    color: #94a3b8;
-    border: 1px solid #1e293b;
+}}
+QTabBar::tab {{
+    background-color: {t["header"]};
+    color: {t["muted"]};
+    border: 1px solid {t["border"]};
     border-bottom: none;
     border-top-left-radius: 8px;
     border-top-right-radius: 8px;
     padding: 9px 20px;
     margin-right: 4px;
     font-weight: 600;
-}
-QTabBar::tab:selected {
-    background-color: #111827;
-    color: #60a5fa;
-    border-bottom: 2px solid #3b82f6;
-}
-QTableWidget {
-    background-color: #0b1120;
-    alternate-background-color: #0f172a;
-    color: #e2e8f0;
-    gridline-color: #1e293b;
-    border: 1px solid #1e293b;
+}}
+QTabBar::tab:selected {{
+    background-color: {t["card"]};
+    color: {t["accent_light"]};
+    border-bottom: 2px solid {t["accent1"]};
+}}
+QTableWidget {{
+    background-color: {t["input"]};
+    alternate-background-color: {t["alt_row"]};
+    color: {t["text"]};
+    gridline-color: {t["border"]};
+    border: 1px solid {t["border"]};
     border-radius: 8px;
-    selection-background-color: #1e3a8a;
-    selection-color: #ffffff;
-}
-QHeaderView::section {
-    background-color: #131c31;
-    color: #94a3b8;
+    selection-background-color: {t["sel_bg"]};
+    selection-color: {t["title"]};
+}}
+QHeaderView::section {{
+    background-color: {t["hdr_bg"]};
+    color: {t["muted"]};
     padding: 8px;
     border: none;
-    border-bottom: 1px solid #1e293b;
+    border-bottom: 1px solid {t["border"]};
     font-weight: 700;
     font-size: 12px;
-}
-QTextEdit#LogConsole {
-    background-color: #050811;
-    color: #cbd5e1;
-    border: 1px solid #1e293b;
+}}
+QTextEdit#LogConsole {{
+    background-color: {t["console"]};
+    color: {t["text"]};
+    border: 1px solid {t["border"]};
     border-radius: 8px;
     font-family: "Cascadia Code", "Consolas", monospace;
     font-size: 12px;
     padding: 10px;
-}
-QMenu {
-    background-color: #0f172a;
-    color: #e2e8f0;
-    border: 1px solid #334155;
+}}
+QMenu {{
+    background-color: {t["card"]};
+    color: {t["text"]};
+    border: 1px solid {t["btn_border"]};
     border-radius: 8px;
     padding: 6px;
-}
-QMenu::item {
+}}
+QMenu::item {{
     padding: 7px 18px;
     border-radius: 5px;
-}
-QMenu::item:selected {
-    background-color: #2563eb;
+}}
+QMenu::item:selected {{
+    background-color: {t["accent1"]};
     color: #ffffff;
-}
-QProgressBar#BusyBar {
-    background-color: #0d1322;
+}}
+QProgressBar#BusyBar {{
+    background-color: {t["header"]};
     border: none;
     max-height: 3px;
     min-height: 3px;
-}
-QProgressBar#BusyBar::chunk {
-    background: qlineargradient(x1:0, y1:0, x2:1, y2:0, stop:0 #2563eb, stop:1 #06b6d4);
+}}
+QProgressBar#BusyBar::chunk {{
+    background: qlineargradient(x1:0, y1:0, x2:1, y2:0, stop:0 {t["accent1"]}, stop:1 {t["accent_light"]});
     border-radius: 1px;
-}
-QLabel#BusyLabel {
-    color: #60a5fa;
+}}
+QLabel#BusyLabel {{
+    color: {t["accent_light"]};
     font-size: 12px;
     font-weight: 600;
     padding: 0 8px;
-}
-QDialog {
-    background-color: #0f172a;
-    color: #e2e8f0;
-}
+}}
+QDialog {{
+    background-color: {t["card"]};
+    color: {t["text"]};
+}}
 """
-
 
 class EntryDialog(QDialog):
     def __init__(self, parent, title: str, name_label: str, url_label: str, name: str = "", url: str = ""):
@@ -1418,6 +1599,8 @@ class FreeDnetProWindow(QMainWindow):
         self._setup_tray(icon_path)
         if self._config_load_err:
             self.log(self._config_load_err)
+        self._current_theme_is_light = False
+        self._apply_theme(self.config.get("theme", "Midnight Dark (Default)"), save=False)
         self._refresh_target_dropdown()
         self._sync_tables()
 
@@ -1446,6 +1629,8 @@ class FreeDnetProWindow(QMainWindow):
         self.config["server_mode"] = self.server_pool.server_mode
         self.config["quota_preset"] = self.preset_combo.currentText()
         self.config["keep_awake"] = self.chk_keep_awake.isChecked()
+        if hasattr(self, "theme_combo"):
+            self.config["theme"] = self.theme_combo.currentText()
         try:
             self.config["listen_port"] = int(self.port_edit.text().strip())
         except ValueError:
@@ -1596,7 +1781,7 @@ class FreeDnetProWindow(QMainWindow):
         body.addWidget(self.tabs, stretch=1)
 
         # ==========================================================
-        # TAB 1: OVERVIEW (KPIs + Routing + Quick Diagnostics)
+        # TAB 1: OVERVIEW (KPIs + Chain Mode + Recent Activity)
         # ==========================================================
         ov_tab = QWidget()
         ov_lay = QVBoxLayout(ov_tab)
@@ -1633,27 +1818,9 @@ class FreeDnetProWindow(QMainWindow):
         r1.addWidget(self.rb_direct)
         r1.addStretch()
 
-        r1.addWidget(QLabel("Backend Mode:", objectName="FieldLabel"))
-        self.target_combo = QComboBox()
-        self.target_combo.setMinimumWidth(250)
-        self.target_combo.currentTextChanged.connect(self._on_target_change)
-        r1.addWidget(self.target_combo)
-        r_lay.addLayout(r1)
-
-        diag_row = QHBoxLayout()
-        self.ping_btn = QPushButton("Ping All Relays & Servers")
-        self.e2e_btn = QPushButton("Test Proxy (E2E)")
-        self.country_btn = QPushButton("Country / IP Check")
-        self.ping_btn.clicked.connect(self.test_all_accounts)
-        self.e2e_btn.clicked.connect(self.test_proxy_e2e)
-        self.country_btn.clicked.connect(self.check_country_ip)
-        diag_row.addWidget(self.ping_btn)
-        diag_row.addWidget(self.e2e_btn)
-        diag_row.addWidget(self.country_btn)
-        diag_row.addStretch()
         self.ip_badge = QLabel("Exit IP: Not checked yet", objectName="Muted")
-        diag_row.addWidget(self.ip_badge)
-        r_lay.addLayout(diag_row)
+        r1.addWidget(self.ip_badge)
+        r_lay.addLayout(r1)
         ov_lay.addWidget(route_card)
 
         # Compact recent activity preview on Overview
@@ -1720,7 +1887,11 @@ class FreeDnetProWindow(QMainWindow):
         srv_toolbar = QFrame(objectName="Toolbar")
         st_lay = QHBoxLayout(srv_toolbar)
         st_lay.setContentsMargins(12, 8, 12, 8)
-        st_lay.addWidget(QLabel("Manage Render, SnappDeploy & Oracle containers (Right-click row for quick actions)", objectName="Muted"))
+        st_lay.addWidget(QLabel("Backend Mode:", objectName="FieldLabel"))
+        self.target_combo = QComboBox()
+        self.target_combo.setMinimumWidth(250)
+        self.target_combo.currentTextChanged.connect(self._on_target_change)
+        st_lay.addWidget(self.target_combo)
         st_lay.addStretch()
         add_s = QPushButton("+ Add Server", objectName="PrimaryBtn")
         add_s.clicked.connect(self.add_server)
@@ -1780,7 +1951,7 @@ class FreeDnetProWindow(QMainWindow):
         self.tabs.addTab(diag_tab, "IP & Diagnostics")
 
         # ==========================================================
-        # TAB 4: SETTINGS & FULL LOGS
+        # TAB 5: SETTINGS & FULL LOGS
         # ==========================================================
         set_tab = QWidget()
         set_lay = QVBoxLayout(set_tab)
@@ -1788,40 +1959,57 @@ class FreeDnetProWindow(QMainWindow):
         set_lay.setSpacing(12)
 
         cfg_card = QFrame(objectName="Card")
-        c_lay = QHBoxLayout(cfg_card)
-        c_lay.setContentsMargins(16, 14, 16, 14)
+        cfg_vlay = QVBoxLayout(cfg_card)
+        cfg_vlay.setContentsMargins(16, 14, 16, 14)
+        cfg_vlay.setSpacing(10)
 
-        c_lay.addWidget(QLabel("Auth Key:", objectName="FieldLabel"))
+        c_lay1 = QHBoxLayout()
+        c_lay1.addWidget(QLabel("Auth Key:", objectName="FieldLabel"))
         self.auth_edit = QLineEdit(self.config["auth_key"])
         self.auth_edit.setEchoMode(QLineEdit.Password)
-        self.auth_edit.setMinimumWidth(200)
-        c_lay.addWidget(self.auth_edit)
+        self.auth_edit.setMinimumWidth(220)
+        c_lay1.addWidget(self.auth_edit)
 
         self.chk_show_key = QCheckBox("Show")
         self.chk_show_key.toggled.connect(
             lambda checked: self.auth_edit.setEchoMode(QLineEdit.Normal if checked else QLineEdit.Password)
         )
-        c_lay.addWidget(self.chk_show_key)
+        c_lay1.addWidget(self.chk_show_key)
 
         paste_btn = QPushButton("Paste", objectName="SmallBtn")
         paste_btn.clicked.connect(self._paste_auth_key)
-        c_lay.addWidget(paste_btn)
-        c_lay.addStretch()
+        c_lay1.addWidget(paste_btn)
+        c_lay1.addStretch()
 
-        c_lay.addWidget(QLabel("Listen IP:", objectName="FieldLabel"))
+        c_lay1.addWidget(QLabel("Theme:", objectName="FieldLabel"))
+        self.theme_combo = QComboBox()
+        self.theme_combo.addItems(list(THEMES.keys()))
+        saved_theme = self.config.get("theme", "Midnight Dark (Default)")
+        if saved_theme in THEMES:
+            self.theme_combo.setCurrentText(saved_theme)
+        self.theme_combo.setMinimumWidth(210)
+        self.theme_combo.currentTextChanged.connect(lambda name: self._apply_theme(name, save=True))
+        c_lay1.addWidget(self.theme_combo)
+        cfg_vlay.addLayout(c_lay1)
+
+        c_lay2 = QHBoxLayout()
+        c_lay2.addWidget(QLabel("Listen IP:", objectName="FieldLabel"))
         self.host_edit = QLineEdit(self.config["listen_host"])
-        self.host_edit.setFixedWidth(115)
-        c_lay.addWidget(self.host_edit)
+        self.host_edit.setFixedWidth(125)
+        c_lay2.addWidget(self.host_edit)
 
-        c_lay.addWidget(QLabel("Port:", objectName="FieldLabel"))
+        c_lay2.addSpacing(8)
+        c_lay2.addWidget(QLabel("Port:", objectName="FieldLabel"))
         self.port_edit = QLineEdit(str(self.config["listen_port"]))
-        self.port_edit.setFixedWidth(68)
-        c_lay.addWidget(self.port_edit)
+        self.port_edit.setFixedWidth(72)
+        c_lay2.addWidget(self.port_edit)
 
+        c_lay2.addStretch()
         self.chk_keep_awake = QCheckBox("Keep Awake (10m)")
         self.chk_keep_awake.setChecked(bool(self.config.get("keep_awake", True)))
         self.chk_keep_awake.toggled.connect(self._on_keep_awake_change)
-        c_lay.addWidget(self.chk_keep_awake)
+        c_lay2.addWidget(self.chk_keep_awake)
+        cfg_vlay.addLayout(c_lay2)
         set_lay.addWidget(cfg_card)
 
         log_hdr = QHBoxLayout()
@@ -2031,13 +2219,25 @@ class FreeDnetProWindow(QMainWindow):
             self.proxy.keep_awake = val
             self.log(f"Keep Awake {'enabled' if val else 'disabled'}.")
 
+    def _apply_theme(self, theme_name: str, save: bool = True):
+        if theme_name not in THEMES:
+            theme_name = "Midnight Dark (Default)"
+        theme = THEMES[theme_name]
+        self._current_theme_is_light = bool(theme.get("is_light", False))
+        app = QApplication.instance()
+        if app is not None:
+            app.setStyleSheet(build_qss(theme))
+        if save:
+            self._save_config()
+            self.log(f"Theme changed to: {theme_name}")
+
     def _on_route_change(self):
         mode = "direct" if self.rb_direct.isChecked() else "gas"
         self._save_config()
         if self.proxy and self.proxy.running:
             self.proxy.route_mode = mode
             lbl = "DIRECT" if mode == "direct" else "GAS"
-            self.status_pill.setText(f"● {lbl} ({self.config['listen_host']}:{self.config['listen_port']})")
+            self.status_pill.setText(f"● RUNNING · {lbl}")
             self.log(f"Switched live chain mode to: {lbl}")
 
     # --- GAS Account CRUD ---
@@ -2663,7 +2863,10 @@ class FreeDnetProWindow(QMainWindow):
                 item.setText(str(v))
                 item.setTextAlignment(Qt.AlignLeft | Qt.AlignVCenter if c in (1, 7) else Qt.AlignCenter)
                 if c == 2:
-                    color = "#34d399" if status in ("Ready", "Active") else ("#94a3b8" if status == "Disabled" else "#fbbf24")
+                    if getattr(self, "_current_theme_is_light", False):
+                        color = "#15803d" if status in ("Ready", "Active") else ("#786252" if status == "Disabled" else "#b45309")
+                    else:
+                        color = "#34d399" if status in ("Ready", "Active") else ("#94a3b8" if status == "Disabled" else "#fbbf24")
                     item.setForeground(QColor(color))
 
         self.srv_table.setRowCount(len(self.server_pool.servers))
@@ -2679,7 +2882,10 @@ class FreeDnetProWindow(QMainWindow):
                 item.setText(str(v))
                 item.setTextAlignment(Qt.AlignLeft | Qt.AlignVCenter if c in (1, 6) else Qt.AlignCenter)
                 if c == 2:
-                    color = "#34d399" if status == "Ready" else ("#94a3b8" if status == "Disabled" else "#f87171")
+                    if getattr(self, "_current_theme_is_light", False):
+                        color = "#15803d" if status == "Ready" else ("#786252" if status == "Disabled" else "#b91c1c")
+                    else:
+                        color = "#34d399" if status == "Ready" else ("#94a3b8" if status == "Disabled" else "#f87171")
                     item.setForeground(QColor(color))
 
         enabled_gas = sum(1 for a in self.pool.accounts if a.enabled)
@@ -2766,7 +2972,6 @@ def main():
     enable_windows_dpi_awareness()
     app = QApplication(sys.argv)
     app.setStyle("Fusion")
-    app.setStyleSheet(PRO_QSS)
     ico = _resource_path("freednet.ico")
     if os.path.exists(ico):
         app.setWindowIcon(QIcon(ico))
