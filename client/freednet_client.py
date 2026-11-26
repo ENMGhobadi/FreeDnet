@@ -31,7 +31,18 @@ import zipfile
 
 
 
-BASE_DIR = os.path.dirname(sys.executable) if getattr(sys, "frozen", False) else os.path.dirname(os.path.abspath(__file__))
+def _resolve_base_dir() -> str:
+    if getattr(sys, "frozen", False):
+        exe_dir = os.path.dirname(os.path.abspath(sys.executable))
+        if os.path.basename(exe_dir).lower() == "dist":
+            parent_dir = os.path.dirname(exe_dir)
+            if os.path.exists(os.path.join(parent_dir, "freednet_client.py")) or os.path.exists(os.path.join(parent_dir, "config.json")):
+                return parent_dir
+        return exe_dir
+    return os.path.dirname(os.path.abspath(__file__))
+
+
+BASE_DIR = _resolve_base_dir()
 CONFIG_PATH = os.path.join(BASE_DIR, "config.json")
 XRAY_DIR = os.path.join(BASE_DIR, "xray")
 XRAY_EXE = os.path.join(XRAY_DIR, "xray.exe")
@@ -1228,6 +1239,7 @@ class FreeDnetProWindow(QMainWindow):
         self.resize(980, 640)
         self.setMinimumSize(860, 560)
 
+        self._config_load_err = ""
         self.config = self._load_config()
         preset = self.config.get("quota_preset", DEFAULT_PRESET)
         if preset not in GAS_QUOTA_PRESETS:
@@ -1259,6 +1271,8 @@ class FreeDnetProWindow(QMainWindow):
         self._peak_rx_rate = 0.0
 
         self._build_ui()
+        if self._config_load_err:
+            self.log(self._config_load_err)
         self._refresh_target_dropdown()
         self._sync_tables()
 
@@ -1269,11 +1283,11 @@ class FreeDnetProWindow(QMainWindow):
     def _load_config(self) -> dict:
         if os.path.exists(CONFIG_PATH):
             try:
-                with open(CONFIG_PATH, "r", encoding="utf-8") as f:
+                with open(CONFIG_PATH, "r", encoding="utf-8-sig") as f:
                     data = json.load(f)
                 return {**DEFAULT_CONFIG, **data}
-            except Exception:
-                pass
+            except Exception as e:
+                self._config_load_err = f"Failed to read {CONFIG_PATH}: {e}"
         return dict(DEFAULT_CONFIG)
 
     def _save_config(self):
@@ -1900,7 +1914,7 @@ class FreeDnetProWindow(QMainWindow):
                     self.log(f"GAS Ping OK [{acc.name}]: {lat} ms")
                 else:
                     acc.last_error = res.get("error", "Error")
-                    self.log(f"GAS Ping FAILED [{acc.name}]: {acc.last_error}")
+                    self.log(f"GAS Ping FAILED [{acc.name}]: {self.last_error if hasattr(self, 'last_error') else acc.last_error}")
 
             if any(s is not None for s in servers):
                 first_gas = next((a for a in self.pool.accounts if a.enabled), self.pool.accounts[0])
