@@ -1,0 +1,324 @@
+"""Responsive FlowLayout and deployment/entry dialogs for FreeDnet."""
+
+import time
+from PySide6.QtCore import QPoint, QRect, QSize, Qt
+from PySide6.QtWidgets import (
+    QComboBox,
+    QDialog,
+    QDialogButtonBox,
+    QFormLayout,
+    QLabel,
+    QLayout,
+    QLineEdit,
+    QMessageBox,
+    QVBoxLayout,
+)
+
+class FlowLayout(QLayout):
+    """Responsive wrapping layout so toolbars and cards never overlap on narrow windows."""
+
+    def __init__(self, parent=None, margin: int = 0, h_spacing: int = 8, v_spacing: int = 8):
+        super().__init__(parent)
+        self._items = []
+        self._h_space = h_spacing
+        self._v_space = v_spacing
+        self.setContentsMargins(margin, margin, margin, margin)
+
+    def addItem(self, item):
+        self._items.append(item)
+
+    def addWidget(self, w):
+        super().addWidget(w)
+
+    def addSpacing(self, _px: int):
+        pass
+
+    def addStretch(self, _s: int = 0):
+        pass
+
+    def count(self):
+        return len(self._items)
+
+    def itemAt(self, index):
+        return self._items[index] if 0 <= index < len(self._items) else None
+
+    def takeAt(self, index):
+        return self._items.pop(index) if 0 <= index < len(self._items) else None
+
+    def expandingDirections(self):
+        return Qt.Orientation(0)
+
+    def hasHeightForWidth(self):
+        return True
+
+    def heightForWidth(self, width):
+        return self._do_layout(QRect(0, 0, width, 0), True)
+
+    def setGeometry(self, rect):
+        super().setGeometry(rect)
+        self._do_layout(rect, False)
+
+    def sizeHint(self):
+        return self.minimumSize()
+
+    def minimumSize(self):
+        size = QSize()
+        for item in self._items:
+            size = size.expandedTo(item.minimumSize())
+        m = self.contentsMargins()
+        size += QSize(m.left() + m.right(), m.top() + m.bottom())
+        return size
+
+    def _do_layout(self, rect, test_only):
+        m = self.contentsMargins()
+        eff = rect.adjusted(m.left(), m.top(), -m.right(), -m.bottom())
+        x = eff.x()
+        y = eff.y()
+        line_height = 0
+        for item in self._items:
+            sz = item.sizeHint()
+            next_x = x + sz.width() + self._h_space
+            if next_x - self._h_space > eff.right() + 1 and line_height > 0:
+                x = eff.x()
+                y += line_height + self._v_space
+                next_x = x + sz.width() + self._h_space
+                line_height = 0
+            if not test_only:
+                item.setGeometry(QRect(QPoint(x, y), sz))
+            x = next_x
+            line_height = max(line_height, sz.height())
+        return y + line_height - rect.y() + m.bottom()
+
+
+
+class EntryDialog(QDialog):
+    def __init__(self, parent, title: str, name_label: str, url_label: str, name: str = "", url: str = ""):
+        super().__init__(parent)
+        self.setWindowTitle(title)
+        self.setMinimumWidth(480)
+
+        layout = QVBoxLayout(self)
+        form = QFormLayout()
+        self.name_edit = QLineEdit(name)
+        self.url_edit = QLineEdit(url)
+        self.url_edit.setPlaceholderText("https://...")
+        form.addRow(name_label, self.name_edit)
+        form.addRow(url_label, self.url_edit)
+        layout.addLayout(form)
+
+        buttons = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
+        buttons.accepted.connect(self._on_accept)
+        buttons.rejected.connect(self.reject)
+        layout.addWidget(buttons)
+
+    def _on_accept(self):
+        name = self.name_edit.text().strip()
+        url = self.url_edit.text().strip()
+        if not name or not url.startswith("http"):
+            QMessageBox.warning(self, "Invalid Input", "Please enter a valid name and https://... URL.")
+            return
+        self.accept()
+
+    def values(self) -> tuple[str, str]:
+        return self.name_edit.text().strip(), self.url_edit.text().strip()
+
+
+
+RENDER_REGIONS = [
+    ("Frankfurt, Germany (EU)", "frankfurt"),
+    ("Oregon, USA (US West)", "oregon"),
+    ("Ohio, USA (US East)", "ohio"),
+    ("Virginia, USA (US East)", "virginia"),
+    ("Singapore (Asia)", "singapore"),
+]
+
+
+class RenderDeployDialog(QDialog):
+    def __init__(self, parent, default_auth_key: str):
+        super().__init__(parent)
+        self.setWindowTitle("Deploy FreeDnet Server on Render")
+        self.setMinimumWidth(520)
+
+        layout = QVBoxLayout(self)
+        form = QFormLayout()
+
+        self.api_key_edit = QLineEdit()
+        self.api_key_edit.setEchoMode(QLineEdit.Password)
+        self.api_key_edit.setPlaceholderText("rnd_xxxxxxxxxxxxxxxxxxxxxxxx")
+        form.addRow("Render API Key:", self.api_key_edit)
+
+        self.name_edit = QLineEdit(f"freednet-node-{int(time.time()) % 10000}")
+        form.addRow("Service Name:", self.name_edit)
+
+        self.region_combo = QComboBox()
+        for label, slug in RENDER_REGIONS:
+            self.region_combo.addItem(label, slug)
+        form.addRow("Region / Location:", self.region_combo)
+
+        self.repo_edit = QLineEdit("https://github.com/ENMGhobadi/FreeDnet")
+        form.addRow("GitHub Repo URL:", self.repo_edit)
+
+        self.auth_edit = QLineEdit(default_auth_key)
+        form.addRow("AUTH_KEY (Env):", self.auth_edit)
+
+        layout.addLayout(form)
+        hint = QLabel("Get your Render API Key from: dashboard.render.com/u/settings#api-keys", objectName="Muted")
+        hint.setWordWrap(True)
+        layout.addWidget(hint)
+
+        buttons = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
+        buttons.button(QDialogButtonBox.Ok).setText("Deploy Now")
+        buttons.accepted.connect(self._on_accept)
+        buttons.rejected.connect(self.reject)
+        layout.addWidget(buttons)
+
+    def _on_accept(self):
+        if not self.api_key_edit.text().strip():
+            QMessageBox.warning(self, "Missing API Key", "Please enter your Render API Key.")
+            return
+        if not self.name_edit.text().strip():
+            QMessageBox.warning(self, "Missing Name", "Please enter a Service Name.")
+            return
+        if not self.repo_edit.text().strip().startswith("https://github.com/"):
+            QMessageBox.warning(self, "Invalid Repo", "Please enter a valid https://github.com/... repository URL.")
+            return
+        self.accept()
+
+    def values(self) -> dict:
+        return {
+            "api_key": self.api_key_edit.text().strip(),
+            "name": self.name_edit.text().strip(),
+            "region": self.region_combo.currentData(),
+            "repo": self.repo_edit.text().strip(),
+            "auth_key": self.auth_edit.text().strip() or "change-me-freednet-key",
+        }
+
+
+class SnapDeployDialog(QDialog):
+    def __init__(self, parent, default_auth_key: str):
+        super().__init__(parent)
+        self.setWindowTitle("Deploy FreeDnet Server on SnapDeploy")
+        self.setMinimumWidth(520)
+
+        layout = QVBoxLayout(self)
+        form = QFormLayout()
+
+        self.api_key_edit = QLineEdit()
+        self.api_key_edit.setEchoMode(QLineEdit.Password)
+        self.api_key_edit.setPlaceholderText("sk_... or sd_pat_...")
+        form.addRow("SnapDeploy API Key:", self.api_key_edit)
+
+        self.name_edit = QLineEdit(f"freednet-node-{int(time.time()) % 10000}")
+        form.addRow("Container Name:", self.name_edit)
+
+        self.repo_edit = QLineEdit("ENMGhobadi/FreeDnet")
+        form.addRow("GitHub Repo (owner/name):", self.repo_edit)
+
+        self.auth_edit = QLineEdit(default_auth_key)
+        form.addRow("AUTH_KEY (Env):", self.auth_edit)
+
+        layout.addLayout(form)
+        hint = QLabel("Runs on AWS US-East. GitHub must be connected in your SnapDeploy dashboard.", objectName="Muted")
+        hint.setWordWrap(True)
+        layout.addWidget(hint)
+
+        buttons = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
+        buttons.button(QDialogButtonBox.Ok).setText("Deploy Now")
+        buttons.accepted.connect(self._on_accept)
+        buttons.rejected.connect(self.reject)
+        layout.addWidget(buttons)
+
+    def _on_accept(self):
+        if not self.api_key_edit.text().strip():
+            QMessageBox.warning(self, "Missing API Key", "Please enter your SnapDeploy API Key.")
+            return
+        if not self.name_edit.text().strip():
+            QMessageBox.warning(self, "Missing Name", "Please enter a Container Name.")
+            return
+        repo = self.repo_edit.text().strip().replace("https://github.com/", "").strip("/")
+        if "/" not in repo:
+            QMessageBox.warning(self, "Invalid Repo", "Enter repo as owner/name (e.g. ENMGhobadi/FreeDnet).")
+            return
+        self.accept()
+
+    def values(self) -> dict:
+        repo = self.repo_edit.text().strip().replace("https://github.com/", "").strip("/")
+        return {
+            "api_key": self.api_key_edit.text().strip(),
+            "name": self.name_edit.text().strip(),
+            "repo": repo,
+            "auth_key": self.auth_edit.text().strip() or "change-me-freednet-key",
+        }
+
+
+CF_LOCATIONS = [
+    ("Auto (Nearest)", ""),
+    ("Western Europe (EU)", "weur"),
+    ("Eastern Europe (EU)", "eeur"),
+    ("Eastern North America (US)", "enam"),
+    ("Western North America (US)", "wnam"),
+    ("Asia-Pacific (APAC)", "apac"),
+]
+
+
+class CloudflareDeployDialog(QDialog):
+    def __init__(self, parent, default_auth_key: str):
+        super().__init__(parent)
+        self.setWindowTitle("Deploy FreeDnet Worker on Cloudflare")
+        self.setMinimumWidth(520)
+
+        layout = QVBoxLayout(self)
+        form = QFormLayout()
+
+        self.account_edit = QLineEdit()
+        self.account_edit.setPlaceholderText("32-char Cloudflare Account ID")
+        form.addRow("Account ID:", self.account_edit)
+
+        self.token_edit = QLineEdit()
+        self.token_edit.setEchoMode(QLineEdit.Password)
+        self.token_edit.setPlaceholderText("Cloudflare API Token (Workers Scripts:Edit)")
+        form.addRow("API Token:", self.token_edit)
+
+        self.name_edit = QLineEdit(f"freednet-cf-{int(time.time()) % 10000}")
+        form.addRow("Worker Name:", self.name_edit)
+
+        self.loc_combo = QComboBox()
+        for label, hint in CF_LOCATIONS:
+            self.loc_combo.addItem(label, hint)
+        form.addRow("Location Hint:", self.loc_combo)
+
+        self.auth_edit = QLineEdit(default_auth_key)
+        form.addRow("AUTH_KEY (Env):", self.auth_edit)
+
+        layout.addLayout(form)
+        hint = QLabel("Deploys Worker + SQLite Durable Object (Free plan compatible). Ensure workers.dev subdomain is enabled in Cloudflare.", objectName="Muted")
+        hint.setWordWrap(True)
+        layout.addWidget(hint)
+
+        buttons = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
+        buttons.button(QDialogButtonBox.Ok).setText("Deploy Now")
+        buttons.accepted.connect(self._on_accept)
+        buttons.rejected.connect(self.reject)
+        layout.addWidget(buttons)
+
+    def _on_accept(self):
+        if not self.account_edit.text().strip():
+            QMessageBox.warning(self, "Missing Account ID", "Please enter your Cloudflare Account ID.")
+            return
+        if not self.token_edit.text().strip():
+            QMessageBox.warning(self, "Missing API Token", "Please enter your Cloudflare API Token.")
+            return
+        if not self.name_edit.text().strip():
+            QMessageBox.warning(self, "Missing Name", "Please enter a Worker Name.")
+            return
+        self.accept()
+
+    def values(self) -> dict:
+        return {
+            "account_id": self.account_edit.text().strip(),
+            "api_token": self.token_edit.text().strip(),
+            "name": self.name_edit.text().strip().lower(),
+            "location_hint": self.loc_combo.currentData(),
+            "location_label": self.loc_combo.currentText(),
+            "auth_key": self.auth_edit.text().strip() or "change-me-freednet-key",
+        }
