@@ -420,15 +420,23 @@ class GasAccountPool:
                     chosen.rpm_timestamps.append(now)
                     return chosen
 
-                any_under_daily = any(
+                if not any(acc.enabled and acc.url for acc in self.accounts):
+                    raise RuntimeError("No enabled GAS accounts available")
+
+                if not any(
+                    acc.enabled and acc.url and acc.daily_requests < self.daily_limit
+                    for acc in self.accounts
+                ):
+                    raise RuntimeError("No GAS accounts with remaining daily quota")
+
+                if not any(
                     acc.enabled
                     and acc.url
                     and acc not in exclude
                     and acc.daily_requests < self.daily_limit
                     for acc in self.accounts
-                )
-                if not any_under_daily:
-                    raise RuntimeError("No GAS accounts with remaining daily quota")
+                ):
+                    raise RuntimeError("No alternative GAS accounts available")
 
                 remaining = deadline - now
                 if remaining <= 0:
@@ -646,6 +654,8 @@ class FreeDnetProxyServer:
         self.rx_bytes = 0
         self._stat_lock = threading.Lock()
         self._tunnel_sem = threading.Semaphore(96)
+        self._gas_open_sem = threading.Semaphore(16)
+        self._last_rl_log = 0.0
 
     def start(self):
         self.server_sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
@@ -696,35 +706,54 @@ class FreeDnetProxyServer:
 
         excluded = set()
         last_err = "Unknown error"
+        acquire_timeout = 6.0 if action == "open" else 15.0
 
-        for _ in range(retries + 1):
-            try:
-                acc = self.pool.acquire(exclude=excluded)
-            except RuntimeError as e:
-                return {"ok": False, "error": str(e)}
+        open_acquired = False
+        if action == "open":
+            open_acquired = self._gas_open_sem.acquire(timeout=4.0)
+            if not open_acquired:
+                return {"ok": False, "error": "GAS open queue busy (burst)"}
 
-            t0 = time.time()
-            res, rate_limited = post_to_gas(acc.url, payload)
-            lat = int((time.time() - t0) * 1000)
+        try:
+            for attempt in range(retries + 1):
+                try:
+                    acc = self.pool.acquire(timeout=acquire_timeout, exclude=excluded)
+                except RuntimeError as e:
+                    err_str = str(e)
+                    if attempt > 0 and err_str == "No alternative GAS accounts available":
+                        return {"ok": False, "error": last_err}
+                    return {"ok": False, "error": err_str}
 
-            if res.get("ok"):
-                self.pool.release(acc, ok=True, latency_ms=lat)
-                self.server_pool.report_success(backend, lat)
-                return res
+                t0 = time.time()
+                res, rate_limited = post_to_gas(acc.url, payload)
+                lat = int((time.time() - t0) * 1000)
 
-            last_err = res.get("error", "GAS error")
-            is_upstream_err = bool(res.get("upstreamError")) or last_err.startswith("Upstream HTTP")
-            if is_upstream_err and backend is not None:
-                self.pool.release(acc, ok=True, latency_ms=lat)
-                self.server_pool.report_failure(backend, last_err)
-                return {"ok": False, "error": last_err, "detail": res.get("detail", ""), "upstreamError": True}
+                if res.get("ok"):
+                    self.pool.release(acc, ok=True, latency_ms=lat)
+                    self.server_pool.report_success(backend, lat)
+                    return res
 
-            self.pool.release(acc, ok=False, latency_ms=lat, rate_limited=rate_limited, err_msg=last_err)
-            excluded.add(acc)
-            if not rate_limited and "Session not found" in last_err:
-                break
+                last_err = res.get("error", "GAS error")
+                is_upstream_err = bool(res.get("upstreamError")) or last_err.startswith("Upstream HTTP")
+                if is_upstream_err and backend is not None:
+                    self.pool.release(acc, ok=True, latency_ms=lat)
+                    self.server_pool.report_failure(backend, last_err)
+                    return {"ok": False, "error": last_err, "detail": res.get("detail", ""), "upstreamError": True}
 
-        return {"ok": False, "error": last_err}
+                self.pool.release(acc, ok=False, latency_ms=lat, rate_limited=rate_limited, err_msg=last_err)
+                if rate_limited:
+                    now_rl = time.time()
+                    if now_rl - self._last_rl_log >= 10.0:
+                        self._last_rl_log = now_rl
+                        self.log(f"GAS Rate-Limit [{acc.name}]: {last_err} (entering cooldown)")
+                excluded.add(acc)
+                if not rate_limited and "Session not found" in last_err:
+                    break
+
+            return {"ok": False, "error": last_err}
+        finally:
+            if open_acquired:
+                self._gas_open_sem.release()
 
     def _open_with_failover(self, host: str, port: int, init_b64: str) -> tuple[dict, BackendServer | None]:
         candidates = self.server_pool.get_candidates(require_explicit=(self.route_mode == "direct"))
@@ -2065,6 +2094,7 @@ class EntryDialog(QDialog):
         return self.name_edit.text().strip(), self.url_edit.text().strip()
 
 
+
 RENDER_REGIONS = [
     ("Frankfurt, Germany (EU)", "frankfurt"),
     ("Oregon, USA (US West)", "oregon"),
@@ -2263,7 +2293,6 @@ class CloudflareDeployDialog(QDialog):
             "location_label": self.loc_combo.currentText(),
             "auth_key": self.auth_edit.text().strip() or "change-me-freednet-key",
         }
-
 
 class FreeDnetProWindow(QMainWindow):
     SRV_PRIORITY_LBL = "Priority (#1 -> #2 Failover)"
@@ -2509,7 +2538,7 @@ class FreeDnetProWindow(QMainWindow):
         body.addWidget(self.tabs, stretch=1)
 
         # ==========================================================
-        # TAB 1: OVERVIEW (KPIs + Chain Mode + Recent Activity)
+        # TAB 1: OVERVIEW (KPIs + Routing + Quick Diagnostics)
         # ==========================================================
         ov_tab = QWidget()
         ov_lay = QVBoxLayout(ov_tab)
@@ -3610,7 +3639,7 @@ class FreeDnetProWindow(QMainWindow):
             if self.sys_proxy_active:
                 set_windows_system_proxy(False)
                 self.sys_proxy_active = False
-                self.sys_proxy_btn.setText(self._t("sys_proxy_off"))
+                self.sys_proxy_btn.setText("Sys Proxy: OFF")
                 self.sys_proxy_btn.setObjectName("")
                 self.sys_proxy_btn.style().unpolish(self.sys_proxy_btn)
                 self.sys_proxy_btn.style().polish(self.sys_proxy_btn)
@@ -3618,11 +3647,11 @@ class FreeDnetProWindow(QMainWindow):
             self.proxy = None
             self._save_config()
             self.status_pill.setObjectName("StatusPillStopped")
-            self.status_pill.setText(self._t("stopped"))
+            self.status_pill.setText("● STOPPED")
             self.status_pill.style().unpolish(self.status_pill)
             self.status_pill.style().polish(self.status_pill)
             self.start_btn.setObjectName("PrimaryBtn")
-            self.start_btn.setText(self._t("start_proxy"))
+            self.start_btn.setText("▶  Start Proxy")
             self.start_btn.style().unpolish(self.start_btn)
             self.start_btn.style().polish(self.start_btn)
             return
@@ -3652,11 +3681,11 @@ class FreeDnetProWindow(QMainWindow):
             self.proxy.start()
             lbl = "DIRECT" if mode == "direct" else "GAS"
             self.status_pill.setObjectName("StatusPillRunning")
-            self.status_pill.setText(f"{self._t('running')} · {lbl}")
+            self.status_pill.setText(f"● RUNNING · {lbl}")
             self.status_pill.style().unpolish(self.status_pill)
             self.status_pill.style().polish(self.status_pill)
             self.start_btn.setObjectName("DangerBtn")
-            self.start_btn.setText(self._t("stop_proxy"))
+            self.start_btn.setText("■  Stop Proxy")
             self.start_btn.style().unpolish(self.start_btn)
             self.start_btn.style().polish(self.start_btn)
         except Exception as e:
@@ -3869,7 +3898,7 @@ class FreeDnetProWindow(QMainWindow):
         if self.sys_proxy_active:
             set_windows_system_proxy(False)
             self.sys_proxy_active = False
-            self.sys_proxy_btn.setText(self._t("sys_proxy_off"))
+            self.sys_proxy_btn.setText("Sys Proxy: OFF")
             self.sys_proxy_btn.setObjectName("")
             self.sys_proxy_btn.style().unpolish(self.sys_proxy_btn)
             self.sys_proxy_btn.style().polish(self.sys_proxy_btn)
@@ -3882,7 +3911,7 @@ class FreeDnetProWindow(QMainWindow):
         port = int(self.config["listen_port"])
         if set_windows_system_proxy(True, host, port):
             self.sys_proxy_active = True
-            self.sys_proxy_btn.setText(self._t("sys_proxy_on"))
+            self.sys_proxy_btn.setText("Sys Proxy: ON")
             self.sys_proxy_btn.setObjectName("PrimaryBtn")
             self.sys_proxy_btn.style().unpolish(self.sys_proxy_btn)
             self.sys_proxy_btn.style().polish(self.sys_proxy_btn)
@@ -3891,7 +3920,7 @@ class FreeDnetProWindow(QMainWindow):
     def toggle_tun_mode(self):
         if self.tun_active:
             self._stop_tun_process()
-            self.tun_btn.setText(self._t("tun_off"))
+            self.tun_btn.setText("TUN Mode: OFF")
             self.tun_btn.setObjectName("")
             self.tun_btn.style().unpolish(self.tun_btn)
             self.tun_btn.style().polish(self.tun_btn)
@@ -3920,7 +3949,7 @@ class FreeDnetProWindow(QMainWindow):
                 return
 
         self.tun_btn.setEnabled(False)
-        self.tun_btn.setText(self._t("tun_starting"))
+        self.tun_btn.setText("Starting TUN...")
 
         def worker():
             tid = self._start_busy("Preparing Xray TUN & Wintun...")
@@ -3961,10 +3990,10 @@ class FreeDnetProWindow(QMainWindow):
     def _update_tun_btn_ui(self):
         self.tun_btn.setEnabled(True)
         if self.tun_active:
-            self.tun_btn.setText(self._t("tun_on"))
+            self.tun_btn.setText("TUN Mode: ON")
             self.tun_btn.setObjectName("PrimaryBtn")
         else:
-            self.tun_btn.setText(self._t("tun_off"))
+            self.tun_btn.setText("TUN Mode: OFF")
             self.tun_btn.setObjectName("")
         self.tun_btn.style().unpolish(self.tun_btn)
         self.tun_btn.style().polish(self.tun_btn)
@@ -4095,8 +4124,8 @@ class FreeDnetProWindow(QMainWindow):
 
         if getattr(self, "tray", None):
             running = bool(self.proxy and self.proxy.running)
-            self.tray_proxy_act.setText(self._t("tray_stop") if running else self._t("tray_start"))
-            self.tray_tun_act.setText(self._t("tun_on") if self.tun_active else self._t("tun_off"))
+            self.tray_proxy_act.setText("Stop Proxy" if running else "Start Proxy")
+            self.tray_tun_act.setText("TUN Mode: ON" if self.tun_active else "TUN Mode: OFF")
 
 
 def main():
