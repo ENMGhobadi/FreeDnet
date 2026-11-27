@@ -1217,10 +1217,13 @@ class FreeDnetProWindow(QMainWindow):
         return None
 
     def deploy_on_render(self):
-        dlg = RenderDeployDialog(self, self.auth_edit.text().strip() or "change-me-freednet-key")
+        saved_r = (self.config.get("saved_deploy_creds") or {}).get("render", {})
+        dlg = RenderDeployDialog(self, self.auth_edit.text().strip() or "change-me-freednet-key", saved_creds=saved_r)
         if dlg.exec() != QDialog.Accepted:
             return
         params = dlg.values()
+        self.config.setdefault("saved_deploy_creds", {})["render"] = {"api_key": params["api_key"]}
+        self._save_config()
 
         def worker():
             tid = self._start_busy(f"Deploying {params['name']} on Render ({params['region']})...")
@@ -1304,10 +1307,13 @@ class FreeDnetProWindow(QMainWindow):
         threading.Thread(target=worker, daemon=True).start()
 
     def deploy_on_snapdeploy(self):
-        dlg = SnapDeployDialog(self, self.auth_edit.text().strip() or "change-me-freednet-key")
+        saved_s = (self.config.get("saved_deploy_creds") or {}).get("snapdeploy", {})
+        dlg = SnapDeployDialog(self, self.auth_edit.text().strip() or "change-me-freednet-key", saved_creds=saved_s)
         if dlg.exec() != QDialog.Accepted:
             return
         params = dlg.values()
+        self.config.setdefault("saved_deploy_creds", {})["snapdeploy"] = {"api_key": params["api_key"]}
+        self._save_config()
 
         def worker():
             tid = self._start_busy(f"Deploying {params['name']} on SnapDeploy...")
@@ -1465,10 +1471,16 @@ class FreeDnetProWindow(QMainWindow):
         return f"https://{name}.{subdomain}.workers.dev"
 
     def deploy_on_cloudflare(self):
-        dlg = CloudflareDeployDialog(self, self.auth_edit.text().strip() or "change-me-freednet-key")
+        saved_c = (self.config.get("saved_deploy_creds") or {}).get("cloudflare", {})
+        dlg = CloudflareDeployDialog(self, self.auth_edit.text().strip() or "change-me-freednet-key", saved_creds=saved_c)
         if dlg.exec() != QDialog.Accepted:
             return
         params = dlg.values()
+        self.config.setdefault("saved_deploy_creds", {})["cloudflare"] = {
+            "account_id": params["account_id"],
+            "api_token": params["api_token"],
+        }
+        self._save_config()
 
         def worker():
             tid = self._start_busy(f"Deploying {params['name']} on Cloudflare...")
@@ -1510,23 +1522,28 @@ class FreeDnetProWindow(QMainWindow):
     def _prompt_link_deploy_meta(self, srv: BackendServer) -> bool:
         prov = detect_server_provider(srv)
         auth_key = self.auth_edit.text().strip() or "change-me-freednet-key"
+        saved_all = self.config.setdefault("saved_deploy_creds", {})
         if prov == "render":
             key, ok = QInputDialog.getText(
                 self,
                 f"Link Render API Key — {srv.name}",
                 "Enter Render API Key once (it will be saved for 1-click Redeploy):",
                 QLineEdit.Password,
+                text=(saved_all.get("render") or {}).get("api_key", ""),
             )
             if not ok or not key.strip():
                 return False
+            saved_all["render"] = {"api_key": key.strip()}
             srv.deploy_meta = {"provider": "render", "api_key": key.strip(), "service_id": "", "name": srv.name, "auth_key": auth_key}
             self._save_config()
             return True
         if prov == "cloudflare":
+            saved_cf = saved_all.get("cloudflare") or {}
             acc_id, ok1 = QInputDialog.getText(
                 self,
                 f"Link Cloudflare Account ID — {srv.name}",
                 "Enter Cloudflare Account ID (32-char) once:",
+                text=saved_cf.get("account_id", ""),
             )
             if not ok1 or not acc_id.strip():
                 return False
@@ -1535,9 +1552,11 @@ class FreeDnetProWindow(QMainWindow):
                 f"Link Cloudflare API Token — {srv.name}",
                 "Enter Cloudflare API Token once (saved for 1-click Redeploy):",
                 QLineEdit.Password,
+                text=saved_cf.get("api_token", ""),
             )
             if not ok2 or not tok.strip():
                 return False
+            saved_all["cloudflare"] = {"account_id": acc_id.strip(), "api_token": tok.strip()}
             host = (urllib.parse.urlsplit(srv.url).hostname or "").split(".")[0]
             srv.deploy_meta = {
                 "provider": "cloudflare",
@@ -1555,9 +1574,11 @@ class FreeDnetProWindow(QMainWindow):
                 f"Link SnapDeploy API Key — {srv.name}",
                 "Enter SnapDeploy API Key once (saved for 1-click Redeploy):",
                 QLineEdit.Password,
+                text=(saved_all.get("snapdeploy") or {}).get("api_key", ""),
             )
             if not ok or not key.strip():
                 return False
+            saved_all["snapdeploy"] = {"api_key": key.strip()}
             srv.deploy_meta = {
                 "provider": "snapdeploy",
                 "api_key": key.strip(),
