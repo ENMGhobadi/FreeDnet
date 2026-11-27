@@ -143,7 +143,7 @@ RENDER_REGIONS = [
 
 
 class RenderDeployDialog(QDialog):
-    def __init__(self, parent, default_auth_key: str):
+    def __init__(self, parent, default_auth_key: str, saved_creds: dict | None = None):
         super().__init__(parent)
         self.setWindowTitle("Deploy FreeDnet Server on Render")
         self.setMinimumWidth(520)
@@ -151,7 +151,7 @@ class RenderDeployDialog(QDialog):
         layout = QVBoxLayout(self)
         form = QFormLayout()
 
-        self.api_key_edit = QLineEdit()
+        self.api_key_edit = QLineEdit((saved_creds or {}).get("api_key", ""))
         self.api_key_edit.setEchoMode(QLineEdit.Password)
         self.api_key_edit.setPlaceholderText("rnd_xxxxxxxxxxxxxxxxxxxxxxxx")
         form.addRow("Render API Key:", self.api_key_edit)
@@ -204,7 +204,7 @@ class RenderDeployDialog(QDialog):
 
 
 class SnapDeployDialog(QDialog):
-    def __init__(self, parent, default_auth_key: str):
+    def __init__(self, parent, default_auth_key: str, saved_creds: dict | None = None):
         super().__init__(parent)
         self.setWindowTitle("Deploy FreeDnet Server on SnapDeploy")
         self.setMinimumWidth(520)
@@ -212,7 +212,7 @@ class SnapDeployDialog(QDialog):
         layout = QVBoxLayout(self)
         form = QFormLayout()
 
-        self.api_key_edit = QLineEdit()
+        self.api_key_edit = QLineEdit((saved_creds or {}).get("api_key", ""))
         self.api_key_edit.setEchoMode(QLineEdit.Password)
         self.api_key_edit.setPlaceholderText("sk_... or sd_pat_...")
         form.addRow("SnapDeploy API Key:", self.api_key_edit)
@@ -271,7 +271,7 @@ CF_LOCATIONS = [
 
 
 class CloudflareDeployDialog(QDialog):
-    def __init__(self, parent, default_auth_key: str):
+    def __init__(self, parent, default_auth_key: str, saved_creds: dict | None = None):
         super().__init__(parent)
         self.setWindowTitle("Deploy FreeDnet Worker on Cloudflare")
         self.setMinimumWidth(520)
@@ -279,11 +279,11 @@ class CloudflareDeployDialog(QDialog):
         layout = QVBoxLayout(self)
         form = QFormLayout()
 
-        self.account_edit = QLineEdit()
+        self.account_edit = QLineEdit((saved_creds or {}).get("account_id", ""))
         self.account_edit.setPlaceholderText("32-char Cloudflare Account ID")
         form.addRow("Account ID:", self.account_edit)
 
-        self.token_edit = QLineEdit()
+        self.token_edit = QLineEdit((saved_creds or {}).get("api_token", ""))
         self.token_edit.setEchoMode(QLineEdit.Password)
         self.token_edit.setPlaceholderText("Cloudflare API Token (Workers Scripts:Edit)")
         form.addRow("API Token:", self.token_edit)
