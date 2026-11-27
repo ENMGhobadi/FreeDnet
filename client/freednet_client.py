@@ -33,6 +33,7 @@ from PySide6.QtWidgets import (
     QFrame,
     QHBoxLayout,
     QHeaderView,
+    QInputDialog,
     QLabel,
     QLineEdit,
     QMainWindow,
@@ -528,6 +529,10 @@ class FreeDnetProWindow(QMainWindow):
         self.deploy_cf_btn.clicked.connect(self.deploy_on_cloudflare)
         st_lay.addWidget(self.deploy_cf_btn)
         st_lay.addSpacing(4)
+        self.redeploy_all_btn = QPushButton("↻ Redeploy All")
+        self.redeploy_all_btn.clicked.connect(self.redeploy_all_servers)
+        st_lay.addWidget(self.redeploy_all_btn)
+        st_lay.addSpacing(4)
         self.add_s_btn = QPushButton("+ Add Server", objectName="PrimaryBtn")
         add_s = self.add_s_btn
         add_s.clicked.connect(self.add_server)
@@ -733,6 +738,7 @@ class FreeDnetProWindow(QMainWindow):
         menu.addAction("Disable" if srv.enabled else "Enable", self.toggle_server)
         menu.addAction(f"Lock Output to Only: {srv.name}", lambda: self._lock_only_server(srv.name))
         menu.addAction("Ping This Server", lambda: self._ping_single_server(row))
+        menu.addAction(self._t("redeploy_srv"), lambda: self.redeploy_server(row))
         menu.addSeparator()
         menu.addAction("Move Up (▲)", lambda: self.move_server(-1))
         menu.addAction("Move Down (▼)", lambda: self.move_server(1))
@@ -1043,6 +1049,8 @@ class FreeDnetProWindow(QMainWindow):
         self.deploy_render_btn.setText(self._t("deploy_render"))
         self.deploy_snap_btn.setText(self._t("deploy_snap"))
         self.deploy_cf_btn.setText(self._t("deploy_cf"))
+        if hasattr(self, "redeploy_all_btn"):
+            self.redeploy_all_btn.setText(self._t("redeploy_all"))
         self.add_s_btn.setText(self._t("add_server"))
         self.rem_s_btn.setText(self._t("remove_btn"))
         self.srv_table.setHorizontalHeaderLabels(self._t("srv_headers"))
@@ -1258,21 +1266,29 @@ class FreeDnetProWindow(QMainWindow):
                     created = json.loads(resp.read().decode("utf-8", errors="replace"))
 
                 svc = created.get("service", {})
+                svc_id = str(svc.get("id") or "").strip()
                 svc_url = (svc.get("serviceDetails") or {}).get("url", "").strip()
                 dash_url = svc.get("dashboardUrl", "")
                 if not svc_url:
                     raise RuntimeError(f"Service created, but URL missing. Dashboard: {dash_url}")
 
+                meta = {
+                    "provider": "render",
+                    "api_key": params["api_key"],
+                    "service_id": svc_id,
+                    "name": params["name"],
+                    "auth_key": params["auth_key"],
+                }
                 label = f"Render ({params['region']})"
                 self.log(f"Render Deploy STARTED -> {svc_url} | Waiting for build to go LIVE (~2-3 min)...")
                 self.notify(f"Render deploy started for {params['name']} — waiting to go LIVE...", "info")
                 lat = self._wait_until_server_live(tid, label, svc_url, params["auth_key"], max_attempts=30, interval_s=12.0)
                 if lat is not None:
-                    self._pending_srv_queue.put((label, svc_url, lat))
+                    self._pending_srv_queue.put((label, svc_url, lat, meta))
                     self.log(f"✅ {label} is LIVE & READY ({lat} ms) -> {svc_url} | Added to Backend Servers.")
                     self.notify(f"{label} is LIVE & READY ({lat} ms)!", "success")
                 else:
-                    self._pending_srv_queue.put((label, svc_url, 0))
+                    self._pending_srv_queue.put((label, svc_url, 0, meta))
                     self.log(f"⚠️ {label} still building -> {svc_url} | Added to Backend Servers (Ping in a moment).")
                     self.notify(f"{label} added (still building — check Ping soon)", "warning")
             except urllib.error.HTTPError as e:
@@ -1322,16 +1338,23 @@ class FreeDnetProWindow(QMainWindow):
                 if not svc_url:
                     raise RuntimeError(f"SnapDeploy returned no URL: {created}")
 
+                meta = {
+                    "provider": "snapdeploy",
+                    "api_key": params["api_key"],
+                    "name": params["name"],
+                    "repo": params["repo"],
+                    "auth_key": params["auth_key"],
+                }
                 label = f"SnapDeploy ({params['name']})"
                 self.log(f"SnapDeploy STARTED -> {svc_url} | Waiting for build to go LIVE (~2-5 min)...")
                 self.notify(f"SnapDeploy started for {params['name']} — waiting to go LIVE...", "info")
                 lat = self._wait_until_server_live(tid, label, svc_url, params["auth_key"], max_attempts=30, interval_s=12.0)
                 if lat is not None:
-                    self._pending_srv_queue.put((label, svc_url, lat))
+                    self._pending_srv_queue.put((label, svc_url, lat, meta))
                     self.log(f"✅ {label} is LIVE & READY ({lat} ms) -> {svc_url} | Added to Backend Servers.")
                     self.notify(f"{label} is LIVE & READY ({lat} ms)!", "success")
                 else:
-                    self._pending_srv_queue.put((label, svc_url, 0))
+                    self._pending_srv_queue.put((label, svc_url, 0, meta))
                     self.log(f"⚠️ {label} still building -> {svc_url} | Added to Backend Servers (Ping in a moment).")
                     self.notify(f"{label} added (still building — check Ping soon)", "warning")
             except urllib.error.HTTPError as e:
@@ -1358,6 +1381,89 @@ class FreeDnetProWindow(QMainWindow):
                     return f.read()
         raise FileNotFoundError("cloudflare/worker.js not found. Make sure cloudflare/worker.js exists in the repo.")
 
+    def _upload_cloudflare_worker(self, acc_id: str, api_token: str, name: str, location_hint: str, auth_key: str) -> str:
+        worker_js = self._load_cf_worker_source()
+        headers_auth = {
+            "Authorization": f"Bearer {api_token}",
+            "User-Agent": "FreeDnet-Client/2.0",
+        }
+        req_sub = urllib.request.Request(
+            f"https://api.cloudflare.com/client/v4/accounts/{acc_id}/workers/subdomain",
+            headers={**headers_auth, "Accept": "application/json"},
+            method="GET",
+        )
+        with _DIRECT_OPENER.open(req_sub, timeout=20.0) as resp:
+            sub_data = json.loads(resp.read().decode("utf-8", errors="replace"))
+        subdomain = (sub_data.get("result") or {}).get("subdomain", "").strip()
+        if not subdomain:
+            raise RuntimeError("No workers.dev subdomain found. Enable workers.dev once in Cloudflare Dashboard.")
+
+        def build_multipart(include_migration: bool):
+            boundary = f"----FreeDnetCF{int(time.time() * 1000)}"
+            meta = {
+                "main_module": "worker.js",
+                "compatibility_date": "2025-01-01",
+                "bindings": [
+                    {"type": "durable_object_namespace", "name": "TUNNEL_DO", "class_name": "TunnelSessionDO"},
+                    {"type": "plain_text", "name": "AUTH_KEY", "text": auth_key},
+                    {"type": "plain_text", "name": "LOCATION_HINT", "text": location_hint},
+                ],
+            }
+            if include_migration:
+                meta["migrations"] = {"new_sqlite_classes": ["TunnelSessionDO"], "tag": "v1"}
+            parts = [
+                (
+                    f"--{boundary}\r\n"
+                    f'Content-Disposition: form-data; name="metadata"\r\n'
+                    f"Content-Type: application/json\r\n\r\n"
+                    f"{json.dumps(meta)}\r\n"
+                ).encode("utf-8"),
+                (
+                    f"--{boundary}\r\n"
+                    f'Content-Disposition: form-data; name="worker.js"; filename="worker.js"\r\n'
+                    f"Content-Type: application/javascript+module\r\n\r\n"
+                    f"{worker_js}\r\n"
+                    f"--{boundary}--\r\n"
+                ).encode("utf-8"),
+            ]
+            return b"".join(parts), f"multipart/form-data; boundary={boundary}"
+
+        url_upload = f"https://api.cloudflare.com/client/v4/accounts/{acc_id}/workers/scripts/{name}"
+        try:
+            body_bytes, ctype = build_multipart(include_migration=True)
+            req_up = urllib.request.Request(
+                url_upload,
+                data=body_bytes,
+                headers={**headers_auth, "Content-Type": ctype},
+                method="PUT",
+            )
+            with _DIRECT_OPENER.open(req_up, timeout=30.0) as resp:
+                resp.read()
+        except urllib.error.HTTPError as e:
+            err_txt = e.read().decode("utf-8", errors="replace")
+            if e.code == 400 and "migration" in err_txt.lower():
+                body_bytes, ctype = build_multipart(include_migration=False)
+                req_up2 = urllib.request.Request(
+                    url_upload,
+                    data=body_bytes,
+                    headers={**headers_auth, "Content-Type": ctype},
+                    method="PUT",
+                )
+                with _DIRECT_OPENER.open(req_up2, timeout=30.0) as resp:
+                    resp.read()
+            else:
+                raise RuntimeError(f"HTTP {e.code}: {err_txt[:260]}")
+
+        req_en = urllib.request.Request(
+            f"https://api.cloudflare.com/client/v4/accounts/{acc_id}/workers/scripts/{name}/subdomain",
+            data=json.dumps({"enabled": True}).encode("utf-8"),
+            headers={**headers_auth, "Content-Type": "application/json"},
+            method="POST",
+        )
+        with _DIRECT_OPENER.open(req_en, timeout=20.0) as resp:
+            resp.read()
+        return f"https://{name}.{subdomain}.workers.dev"
+
     def deploy_on_cloudflare(self):
         dlg = CloudflareDeployDialog(self, self.auth_edit.text().strip() or "change-me-freednet-key")
         if dlg.exec() != QDialog.Accepted:
@@ -1367,103 +1473,26 @@ class FreeDnetProWindow(QMainWindow):
         def worker():
             tid = self._start_busy(f"Deploying {params['name']} on Cloudflare...")
             try:
-                worker_js = self._load_cf_worker_source()
-                acc_id = params["account_id"]
-                name = params["name"]
-                headers_auth = {
-                    "Authorization": f"Bearer {params['api_token']}",
-                    "User-Agent": "FreeDnet-Client/2.0",
+                worker_url = self._upload_cloudflare_worker(
+                    params["account_id"], params["api_token"], params["name"], params["location_hint"], params["auth_key"]
+                )
+                meta = {
+                    "provider": "cloudflare",
+                    "account_id": params["account_id"],
+                    "api_token": params["api_token"],
+                    "script_name": params["name"],
+                    "location_hint": params["location_hint"],
+                    "auth_key": params["auth_key"],
                 }
-
-                # 1. Fetch workers.dev subdomain
-                req_sub = urllib.request.Request(
-                    f"https://api.cloudflare.com/client/v4/accounts/{acc_id}/workers/subdomain",
-                    headers={**headers_auth, "Accept": "application/json"},
-                    method="GET",
-                )
-                with _DIRECT_OPENER.open(req_sub, timeout=20.0) as resp:
-                    sub_data = json.loads(resp.read().decode("utf-8", errors="replace"))
-                subdomain = (sub_data.get("result") or {}).get("subdomain", "").strip()
-                if not subdomain:
-                    raise RuntimeError("No workers.dev subdomain found. Enable workers.dev once in Cloudflare Dashboard.")
-
-                # 2. Multipart upload Worker + SQLite Durable Object migration
-                def build_multipart(include_migration: bool):
-                    boundary = f"----FreeDnetCF{int(time.time() * 1000)}"
-                    meta = {
-                        "main_module": "worker.js",
-                        "compatibility_date": "2025-01-01",
-                        "bindings": [
-                            {"type": "durable_object_namespace", "name": "TUNNEL_DO", "class_name": "TunnelSessionDO"},
-                            {"type": "plain_text", "name": "AUTH_KEY", "text": params["auth_key"]},
-                            {"type": "plain_text", "name": "LOCATION_HINT", "text": params["location_hint"]},
-                        ],
-                    }
-                    if include_migration:
-                        meta["migrations"] = {"new_sqlite_classes": ["TunnelSessionDO"], "tag": "v1"}
-                    parts = [
-                        (
-                            f"--{boundary}\r\n"
-                            f'Content-Disposition: form-data; name="metadata"\r\n'
-                            f"Content-Type: application/json\r\n\r\n"
-                            f"{json.dumps(meta)}\r\n"
-                        ).encode("utf-8"),
-                        (
-                            f"--{boundary}\r\n"
-                            f'Content-Disposition: form-data; name="worker.js"; filename="worker.js"\r\n'
-                            f"Content-Type: application/javascript+module\r\n\r\n"
-                            f"{worker_js}\r\n"
-                            f"--{boundary}--\r\n"
-                        ).encode("utf-8"),
-                    ]
-                    return b"".join(parts), f"multipart/form-data; boundary={boundary}"
-
-                url_upload = f"https://api.cloudflare.com/client/v4/accounts/{acc_id}/workers/scripts/{name}"
-                try:
-                    body_bytes, ctype = build_multipart(include_migration=True)
-                    req_up = urllib.request.Request(
-                        url_upload,
-                        data=body_bytes,
-                        headers={**headers_auth, "Content-Type": ctype},
-                        method="PUT",
-                    )
-                    with _DIRECT_OPENER.open(req_up, timeout=30.0) as resp:
-                        resp.read()
-                except urllib.error.HTTPError as e:
-                    err_txt = e.read().decode("utf-8", errors="replace")
-                    if e.code == 400 and "migration" in err_txt.lower():
-                        body_bytes, ctype = build_multipart(include_migration=False)
-                        req_up2 = urllib.request.Request(
-                            url_upload,
-                            data=body_bytes,
-                            headers={**headers_auth, "Content-Type": ctype},
-                            method="PUT",
-                        )
-                        with _DIRECT_OPENER.open(req_up2, timeout=30.0) as resp:
-                            resp.read()
-                    else:
-                        raise RuntimeError(f"HTTP {e.code}: {err_txt[:260]}")
-
-                # 3. Enable workers.dev route for this script
-                req_en = urllib.request.Request(
-                    f"https://api.cloudflare.com/client/v4/accounts/{acc_id}/workers/scripts/{name}/subdomain",
-                    data=json.dumps({"enabled": True}).encode("utf-8"),
-                    headers={**headers_auth, "Content-Type": "application/json"},
-                    method="POST",
-                )
-                with _DIRECT_OPENER.open(req_en, timeout=20.0) as resp:
-                    resp.read()
-
-                worker_url = f"https://{name}.{subdomain}.workers.dev"
-                label = f"Cloudflare ({name})"
+                label = f"Cloudflare ({params['name']})"
                 self.log(f"Cloudflare uploaded -> {worker_url} | Verifying LIVE status...")
-                self.notify(f"Cloudflare uploaded — verifying LIVE status...", "info")
+                self.notify("Cloudflare uploaded — verifying LIVE status...", "info")
                 lat = self._wait_until_server_live(tid, label, worker_url, params["auth_key"], max_attempts=8, interval_s=3.0)
                 if lat is not None:
-                    self._pending_srv_queue.put((label, worker_url, lat))
+                    self._pending_srv_queue.put((label, worker_url, lat, meta))
                     self.log(f"✅ {label} is LIVE & READY ({lat} ms) -> {worker_url} | Added to Backend Servers.")
                 else:
-                    self._pending_srv_queue.put((label, worker_url, 0))
+                    self._pending_srv_queue.put((label, worker_url, 0, meta))
                     self.log(f"⚠️ {label} deployed -> {worker_url} | Added to Backend Servers (check Ping).")
                     self.notify(f"{label} deployed (verify with Ping)", "warning")
             except urllib.error.HTTPError as e:
@@ -1473,6 +1502,198 @@ class FreeDnetProWindow(QMainWindow):
             except Exception as e:
                 self.log(f"Cloudflare Deploy FAILED: {e}")
                 self.notify(f"Cloudflare Deploy FAILED: {e}", "error")
+            finally:
+                self._stop_busy(tid)
+
+        threading.Thread(target=worker, daemon=True).start()
+
+    def _prompt_link_deploy_meta(self, srv: BackendServer) -> bool:
+        prov = detect_server_provider(srv)
+        auth_key = self.auth_edit.text().strip() or "change-me-freednet-key"
+        if prov == "render":
+            key, ok = QInputDialog.getText(
+                self,
+                f"Link Render API Key — {srv.name}",
+                "Enter Render API Key once (it will be saved for 1-click Redeploy):",
+                QLineEdit.Password,
+            )
+            if not ok or not key.strip():
+                return False
+            srv.deploy_meta = {"provider": "render", "api_key": key.strip(), "service_id": "", "name": srv.name, "auth_key": auth_key}
+            self._save_config()
+            return True
+        if prov == "cloudflare":
+            acc_id, ok1 = QInputDialog.getText(
+                self,
+                f"Link Cloudflare Account ID — {srv.name}",
+                "Enter Cloudflare Account ID (32-char) once:",
+            )
+            if not ok1 or not acc_id.strip():
+                return False
+            tok, ok2 = QInputDialog.getText(
+                self,
+                f"Link Cloudflare API Token — {srv.name}",
+                "Enter Cloudflare API Token once (saved for 1-click Redeploy):",
+                QLineEdit.Password,
+            )
+            if not ok2 or not tok.strip():
+                return False
+            host = (urllib.parse.urlsplit(srv.url).hostname or "").split(".")[0]
+            srv.deploy_meta = {
+                "provider": "cloudflare",
+                "account_id": acc_id.strip(),
+                "api_token": tok.strip(),
+                "script_name": host or srv.name,
+                "location_hint": "",
+                "auth_key": auth_key,
+            }
+            self._save_config()
+            return True
+        if prov == "snapdeploy":
+            key, ok = QInputDialog.getText(
+                self,
+                f"Link SnapDeploy API Key — {srv.name}",
+                "Enter SnapDeploy API Key once (saved for 1-click Redeploy):",
+                QLineEdit.Password,
+            )
+            if not ok or not key.strip():
+                return False
+            srv.deploy_meta = {
+                "provider": "snapdeploy",
+                "api_key": key.strip(),
+                "name": srv.name,
+                "repo": "ENMGhobadi/FreeDnet",
+                "auth_key": auth_key,
+            }
+            self._save_config()
+            return True
+        QMessageBox.information(self, "Custom Server", f"'{srv.name}' is a custom server and cannot be auto-redeployed.")
+        return False
+
+    def _redeploy_server_sync(self, tid: int, srv: BackendServer):
+        meta = srv.deploy_meta or {}
+        prov = meta.get("provider") or detect_server_provider(srv)
+        auth_key = meta.get("auth_key") or self.auth_edit.text().strip() or "change-me-freednet-key"
+        if prov == "render":
+            api_key = meta.get("api_key", "")
+            headers = {
+                "Authorization": f"Bearer {api_key}",
+                "Accept": "application/json",
+                "Content-Type": "application/json",
+                "User-Agent": "FreeDnet-Client/2.0",
+            }
+            svc_id = meta.get("service_id", "")
+            if not svc_id:
+                req_list = urllib.request.Request("https://api.render.com/v1/services?limit=50", headers=headers, method="GET")
+                with _DIRECT_OPENER.open(req_list, timeout=20.0) as resp:
+                    items = json.loads(resp.read().decode("utf-8", errors="replace"))
+                target_u = srv.url.rstrip("/").lower()
+                for it in items:
+                    s = it.get("service", it) if isinstance(it, dict) else {}
+                    s_url = ((s.get("serviceDetails") or {}).get("url") or "").rstrip("/").lower()
+                    if s_url == target_u:
+                        svc_id = str(s.get("id") or "")
+                        meta["service_id"] = svc_id
+                        break
+            if not svc_id:
+                raise RuntimeError(f"Could not find Render service ID for {srv.url}")
+            req_dep = urllib.request.Request(
+                f"https://api.render.com/v1/services/{svc_id}/deploys",
+                data=json.dumps({"clearCache": "do_not_clear"}).encode("utf-8"),
+                headers=headers,
+                method="POST",
+            )
+            with _DIRECT_OPENER.open(req_dep, timeout=25.0) as resp:
+                resp.read()
+            self.log(f"Render Redeploy STARTED [{srv.name}] -> waiting to go LIVE...")
+            lat = self._wait_until_server_live(tid, srv.name, srv.url, auth_key, max_attempts=30, interval_s=12.0)
+            if lat is not None:
+                self.server_pool.report_success(srv, lat)
+                self.log(f"✅ Render Redeploy LIVE [{srv.name}]: {lat} ms")
+            else:
+                self.log(f"⚠️ Render Redeploy triggered [{srv.name}] (still building)")
+        elif prov == "cloudflare":
+            acc_id = meta.get("account_id", "")
+            tok = meta.get("api_token", "")
+            sname = meta.get("script_name") or (urllib.parse.urlsplit(srv.url).hostname or "").split(".")[0]
+            hint = meta.get("location_hint", "")
+            self._upload_cloudflare_worker(acc_id, tok, sname, hint, auth_key)
+            lat = self._wait_until_server_live(tid, srv.name, srv.url, auth_key, max_attempts=6, interval_s=3.0)
+            if lat is not None:
+                self.server_pool.report_success(srv, lat)
+                self.log(f"✅ Cloudflare Redeploy LIVE [{srv.name}]: {lat} ms")
+            else:
+                self.log(f"⚠️ Cloudflare Worker updated [{srv.name}]")
+        elif prov == "snapdeploy":
+            headers = {
+                "X-API-Key": meta.get("api_key", ""),
+                "Accept": "application/json",
+                "Content-Type": "application/json",
+                "User-Agent": "FreeDnet-Client/2.0",
+            }
+            payload = {
+                "repo": meta.get("repo", "ENMGhobadi/FreeDnet"),
+                "name": meta.get("name", srv.name),
+                "branch": "main",
+                "size": "small",
+                "env": {"AUTH_KEY": auth_key},
+            }
+            req = urllib.request.Request(
+                "https://snapdeploy.dev/api/mobile/deploy",
+                data=json.dumps(payload).encode("utf-8"),
+                headers=headers,
+                method="POST",
+            )
+            with _DIRECT_OPENER.open(req, timeout=30.0) as resp:
+                resp.read()
+            lat = self._wait_until_server_live(tid, srv.name, srv.url, auth_key, max_attempts=30, interval_s=12.0)
+            if lat is not None:
+                self.server_pool.report_success(srv, lat)
+                self.log(f"✅ SnapDeploy Redeploy LIVE [{srv.name}]: {lat} ms")
+        else:
+            raise RuntimeError("Unsupported provider for redeploy")
+
+    def redeploy_server(self, row: int):
+        if not (0 <= row < len(self.server_pool.servers)):
+            return
+        srv = self.server_pool.servers[row]
+        if not srv.deploy_meta and not self._prompt_link_deploy_meta(srv):
+            return
+
+        def worker():
+            tid = self._start_busy(f"Redeploying {srv.name}...")
+            try:
+                self._redeploy_server_sync(tid, srv)
+                self.notify(f"Redeploy complete: {srv.name}", "success")
+            except Exception as e:
+                self.log(f"Redeploy FAILED [{srv.name}]: {e}")
+                self.notify(f"Redeploy FAILED [{srv.name}]: {e}", "error")
+            finally:
+                self._stop_busy(tid)
+
+        threading.Thread(target=worker, daemon=True).start()
+
+    def redeploy_all_servers(self):
+        targets = [s for s in self.server_pool.servers if s.enabled and s.deploy_meta]
+        if not targets:
+            QMessageBox.information(
+                self,
+                "No Linked API Keys Yet",
+                "Servers deployed from now on save their API Key automatically.\n\nFor existing servers, right-click any server row and choose 'Redeploy / Update Code' once to link its API Key.",
+            )
+            return
+
+        def worker():
+            tid = self._start_busy(f"Redeploying {len(targets)} servers...")
+            ok_cnt = 0
+            try:
+                for srv in targets:
+                    try:
+                        self._redeploy_server_sync(tid, srv)
+                        ok_cnt += 1
+                    except Exception as e:
+                        self.log(f"Redeploy FAILED [{srv.name}]: {e}")
+                self.notify(f"Redeploy All finished: {ok_cnt}/{len(targets)} succeeded", "success" if ok_cnt == len(targets) else "warning")
             finally:
                 self._stop_busy(tid)
 
@@ -2399,10 +2620,15 @@ class FreeDnetProWindow(QMainWindow):
         added_srv = False
         while True:
             try:
-                srv_name, srv_url, srv_lat = self._pending_srv_queue.get_nowait()
+                item_q = self._pending_srv_queue.get_nowait()
             except queue.Empty:
                 break
-            srv_obj = BackendServer(srv_name, srv_url, True)
+            if len(item_q) == 4:
+                srv_name, srv_url, srv_lat, srv_meta = item_q
+            else:
+                srv_name, srv_url, srv_lat = item_q
+                srv_meta = None
+            srv_obj = BackendServer(srv_name, srv_url, True, deploy_meta=srv_meta)
             if srv_lat > 0:
                 srv_obj.last_latency_ms = srv_lat
             with self.server_pool.lock:
