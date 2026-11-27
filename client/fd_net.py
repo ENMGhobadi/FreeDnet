@@ -11,6 +11,22 @@ import urllib.request
 
 from fd_config import normalize_tunnel_url, today_str
 
+def detect_server_provider(srv: "BackendServer") -> str:
+    """Identify backend provider ('render', 'cloudflare', 'snapdeploy', or 'custom') from URL and name."""
+    try:
+        host = (urllib.parse.urlsplit(srv.url).hostname or "").lower()
+    except Exception:
+        host = ""
+    name_l = (srv.name or "").lower()
+    if host.endswith(".onrender.com") or "onrender.com" in host or "render" in name_l:
+        return "render"
+    if host.endswith(".workers.dev") or "workers.dev" in host or "cloudflare" in name_l:
+        return "cloudflare"
+    if "snapdeploy" in host or "snapdeploy" in name_l:
+        return "snapdeploy"
+    return "custom"
+
+
 class BackendServer:
     def __init__(self, name: str, url: str, enabled: bool = True):
         self.name = name
@@ -77,6 +93,15 @@ class ServerPool:
             if not enabled:
                 return [] if require_explicit else [None]
 
+            if self.server_mode.startswith("provider:"):
+                prov = self.server_mode[9:]
+                grp = [s for s in enabled if detect_server_provider(s) == prov]
+                if not grp:
+                    return []
+                healthy = [s for s in grp if now >= s.cooldown_until]
+                cooldown = sorted([s for s in grp if now < s.cooldown_until], key=lambda s: s.cooldown_until)
+                return healthy + cooldown
+
             if self.server_mode.startswith("only:"):
                 target_name = self.server_mode[5:]
                 pinned = [s for s in enabled if s.name == target_name]
@@ -97,6 +122,9 @@ class ServerPool:
                 return []
             if self.server_mode == "fair":
                 return list(enabled)
+            if self.server_mode.startswith("provider:"):
+                prov = self.server_mode[9:]
+                return [s for s in enabled if detect_server_provider(s) == prov]
             if self.server_mode.startswith("only:"):
                 target_name = self.server_mode[5:]
                 pinned = [s for s in enabled if s.name == target_name]
