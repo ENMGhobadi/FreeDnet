@@ -270,8 +270,8 @@ class FreeDnetProxyServer:
         self.tx_bytes = 0
         self.rx_bytes = 0
         self._stat_lock = threading.Lock()
-        self._tunnel_sem = threading.Semaphore(96)
-        self._gas_open_sem = threading.Semaphore(40)
+        self._tunnel_sem = threading.Semaphore(256)
+        self._gas_open_sem = threading.Semaphore(64)
         self._last_rl_log = 0.0
 
     def start(self):
@@ -332,8 +332,14 @@ class FreeDnetProxyServer:
             if not open_acquired:
                 return {"ok": False, "error": "GAS open queue busy (burst)"}
 
+        eff_retries = retries
+        if retries > 0:
+            with self.pool.lock:
+                enabled_cnt = sum(1 for a in self.pool.accounts if a.enabled and a.url)
+            if enabled_cnt > 1:
+                eff_retries = min(4, max(retries, enabled_cnt - 1))
         try:
-            for attempt in range(retries + 1):
+            for attempt in range(eff_retries + 1):
                 try:
                     acc = self.pool.acquire(timeout=acquire_timeout, exclude=excluded)
                 except RuntimeError as e:
@@ -352,6 +358,11 @@ class FreeDnetProxyServer:
                     return res
 
                 last_err = res.get("error", "GAS error")
+                is_target_err = bool(res.get("targetError"))
+                if is_target_err:
+                    self.pool.release(acc, ok=True, latency_ms=lat)
+                    self.server_pool.report_success(backend, lat)
+                    return res
                 is_upstream_err = bool(res.get("upstreamError")) or last_err.startswith("Upstream HTTP")
                 if is_upstream_err and backend is not None:
                     self.pool.release(acc, ok=True, latency_ms=lat)
@@ -486,7 +497,7 @@ class FreeDnetProxyServer:
 
     def _mitm_http_loop(self, sock: socket.socket, scheme: str, default_host: str, default_port: int, initial_buf: bytes = b""):
         buf = bytearray(initial_buf)
-        sock.settimeout(30.0)
+        sock.settimeout(12.0)
         while self.running:
             parsed = self._read_http_message(sock, buf)
             if not parsed:
@@ -845,7 +856,7 @@ class FreeDnetProxyServer:
             try:
                 client_sock.settimeout(15.0)
                 while self.running and not closed_evt.is_set():
-                    rlist, _, _ = select.select([client_sock], [], [], 0.1)
+                    rlist, _, _ = select.select([client_sock], [], [], 0.02)
                     if not rlist:
                         continue
                     outgoing = b""
@@ -902,15 +913,15 @@ class FreeDnetProxyServer:
         try:
             while self.running and not closed_evt.is_set():
                 if prev_had_rx:
-                    wait_ms = 120
+                    wait_ms = 0
                 else:
-                    if time.time() - last_activity[0] > 90:
+                    if time.time() - last_activity[0] > 45:
                         return
                     idle_cycles += 1
-                    if self.active_tunnels > 6:
-                        wait_ms = 1200
+                    if self.active_tunnels > 12:
+                        wait_ms = 600
                     else:
-                        wait_ms = 1800 if idle_cycles == 1 else (3500 if idle_cycles == 2 else 6000)
+                        wait_ms = 250 if idle_cycles == 1 else (900 if idle_cycles == 2 else 2500)
 
                 res = self._send_request(
                     "sync",
