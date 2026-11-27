@@ -133,7 +133,10 @@ export class TunnelSessionDO extends DurableObject {
     this.bufferedBytes = 0;
     this.closed = false;
     this.error = null;
-    this.lastTxSeq = 0;
+    this.nextTxSeq = 1;
+    this.pendingTx = new Map();
+    this.rxSeq = 0;
+    this.unacked = null;
     this.waiters = [];
   }
 
@@ -212,6 +215,15 @@ export class TunnelSessionDO extends DurableObject {
     } catch (_) {}
 
     if (action === "open") {
+      if (this.socket) {
+        return jsonResponse({
+          ok: true,
+          sessionId: body.sessionId,
+          rxSeq: this.rxSeq,
+          data: "",
+          closed: this.closed && this.chunks.length === 0 && !this.unacked,
+        });
+      }
       const targetHost = String(body.targetHost || "").trim();
       const targetPort = parseInt(body.targetPort, 10);
       if (!targetHost || !Number.isInteger(targetPort) || targetPort < 1 || targetPort > 65535) {
@@ -234,11 +246,16 @@ export class TunnelSessionDO extends DurableObject {
 
         await new Promise((r) => setTimeout(r, 60));
         const out = this.drainData();
+        if (out.length > 0) {
+          this.rxSeq += 1;
+          this.unacked = { seq: this.rxSeq, buf: out };
+        }
         return jsonResponse({
           ok: true,
           sessionId: body.sessionId,
+          rxSeq: out.length > 0 ? this.rxSeq : 0,
           data: out.length ? bytesToBase64(out) : "",
-          closed: this.closed,
+          closed: this.closed && this.chunks.length === 0 && !this.unacked,
         });
       } catch (err) {
         this.closed = true;
@@ -251,25 +268,49 @@ export class TunnelSessionDO extends DurableObject {
 
     if (action === "sync") {
       if (!this.socket) {
-        return jsonResponse({ ok: false, error: "Session not found", closed: true }, 404);
+        return jsonResponse({ ok: false, sessionError: true, error: "Session not found", closed: true }, 404);
       }
 
       if ((body.dataZ || body.data) && !this.closed && this.writer) {
         const txSeq = Number.isInteger(body.txSeq) ? body.txSeq : 0;
-        if (txSeq > 0 && txSeq <= this.lastTxSeq) {
+        if (txSeq > 0 && (txSeq < this.nextTxSeq || this.pendingTx.has(txSeq))) {
           // Duplicate retried chunk — skip write to protect TLS/TCP stream integrity
         } else {
           try {
             const writeBytes = body.dataZ
               ? await gunzipBytes(base64ToBytes(body.dataZ))
               : base64ToBytes(body.data);
-            if (writeBytes.length > 0) {
+            if (txSeq > 0) {
+              if (this.pendingTx.size < 32) {
+                this.pendingTx.set(txSeq, writeBytes);
+              }
+              while (this.pendingTx.has(this.nextTxSeq)) {
+                const ordered = this.pendingTx.get(this.nextTxSeq);
+                this.pendingTx.delete(this.nextTxSeq);
+                if (ordered.length > 0) {
+                  await this.writer.write(ordered);
+                }
+                this.nextTxSeq += 1;
+              }
+            } else if (writeBytes.length > 0) {
               await this.writer.write(writeBytes);
             }
-            if (txSeq > 0) this.lastTxSeq = txSeq;
           } catch (_) {
             return jsonResponse({ ok: false, error: "Invalid payload data" }, 400);
           }
+        }
+      }
+
+      if (body.txFin && !this.closed && this.writer) {
+        try {
+          await this.writer.close();
+        } catch (_) {}
+      }
+
+      const hasAck = Number.isInteger(body.ackSeq);
+      if (!body.txOnly && this.unacked) {
+        if (!hasAck || body.ackSeq >= this.unacked.seq) {
+          this.unacked = null;
         }
       }
 
@@ -277,10 +318,11 @@ export class TunnelSessionDO extends DurableObject {
       const acceptGzip = Boolean(body.acceptGzip);
 
       if (body.txOnly) {
-        return jsonResponse({ ok: true, data: "", closed: this.closed });
+        const txClosed = this.closed && this.chunks.length === 0 && !this.unacked;
+        return jsonResponse({ ok: true, data: "", closed: txClosed });
       }
 
-      if (this.chunks.length === 0 && !this.closed && waitMs > 0) {
+      if (!this.unacked && this.chunks.length === 0 && !this.closed && waitMs > 0) {
         await new Promise((resolve) => {
           let done = false;
           const finishWait = () => {
@@ -298,21 +340,36 @@ export class TunnelSessionDO extends DurableObject {
         });
       }
 
-      const out = this.drainData();
-      const isClosed = this.closed && this.chunks.length === 0;
+      let out;
+      let outSeq = this.rxSeq;
+      if (this.unacked && hasAck && body.ackSeq < this.unacked.seq) {
+        out = this.unacked.buf;
+        outSeq = this.unacked.seq;
+      } else {
+        out = this.drainData();
+        if (out.length > 0) {
+          this.rxSeq += 1;
+          outSeq = this.rxSeq;
+          if (hasAck) {
+            this.unacked = { seq: outSeq, buf: out };
+          }
+        }
+      }
+      const isClosed = this.closed && this.chunks.length === 0 && !this.unacked;
       const looksLikeTls = out.length >= 2 && out[0] >= 0x14 && out[0] <= 0x17 && out[1] === 0x03;
 
       if (acceptGzip && !looksLikeTls && out.length > 512 && out.length <= 1048576) {
         try {
           const gz = await gzipBytes(out);
           if (gz.length < out.length) {
-            return jsonResponse({ ok: true, dataZ: bytesToBase64(gz), closed: isClosed });
+            return jsonResponse({ ok: true, rxSeq: outSeq, dataZ: bytesToBase64(gz), closed: isClosed });
           }
         } catch (_) {}
       }
 
       return jsonResponse({
         ok: true,
+        rxSeq: outSeq,
         data: out.length ? bytesToBase64(out) : "",
         closed: isClosed,
       });
@@ -362,7 +419,7 @@ export default {
       }
 
       if (action === "open") {
-        const sessionId = crypto.randomUUID();
+        const sessionId = body.clientOpenId ? String(body.clientOpenId) : crypto.randomUUID();
         const id = env.TUNNEL_DO.idFromName(sessionId);
         const hint = (env.LOCATION_HINT || "").trim();
         const stub = hint ? env.TUNNEL_DO.get(id, { locationHint: hint }) : env.TUNNEL_DO.get(id);

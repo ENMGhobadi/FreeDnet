@@ -66,8 +66,10 @@ function doPost(e) {
     if (code < 200 || code >= 300) {
       let parsedErr = null;
       try { parsedErr = JSON.parse(text); } catch (_) {}
-      if (parsedErr && parsedErr.targetError) {
+      // Do not mark 400 (bad client request) or 404 (expired/closed session) or targetError as upstreamError
+      if (parsedErr && (parsedErr.targetError || parsedErr.sessionError || code === 400 || code === 404)) {
         parsedErr.relayedTo = targetUrl;
+        parsedErr.statusCode = code;
         return jsonResponse(parsedErr);
       }
       return jsonResponse({

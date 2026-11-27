@@ -25,10 +25,10 @@ const MAX_SYNC_CHUNK_BYTES = 1024 * 1024; // 1 MB
  *   closed: boolean,
  *   error: string | null,
  *   lastActivity: number,
- *   lastTxSeq: number,
  *   waiters: Array<() => void>
  * }>} */
 const sessions = new Map();
+const openIdMap = new Map(); // clientOpenId -> { sessionId, createdAt }
 
 function safeEqual(a, b) {
   if (typeof a !== 'string' || typeof b !== 'string') return false;
@@ -209,7 +209,24 @@ function handleOpen(body, res) {
     return sendJson(res, 400, { ok: false, error: 'Invalid targetHost or targetPort' });
   }
 
+  const clientOpenId = body.clientOpenId ? String(body.clientOpenId) : '';
+  if (clientOpenId && openIdMap.has(clientOpenId)) {
+    const existingId = openIdMap.get(clientOpenId).sessionId;
+    const existing = sessions.get(existingId);
+    if (existing) {
+      return sendJson(res, 200, {
+        ok: true,
+        sessionId: existingId,
+        data: '',
+        closed: existing.closed && existing.chunks.length === 0 && !existing.unacked
+      });
+    }
+  }
+
   const sessionId = crypto.randomUUID();
+  if (clientOpenId) {
+    openIdMap.set(clientOpenId, { sessionId, createdAt: Date.now() });
+  }
   const family = net.isIP(targetHost) === 6 ? 6 : 4;
   const socket = net.createConnection({ host: targetHost, port: targetPort, family });
   socket.setNoDelay(true);
@@ -222,7 +239,10 @@ function handleOpen(body, res) {
     closed: false,
     error: null,
     lastActivity: Date.now(),
-    lastTxSeq: 0,
+    nextTxSeq: 1,
+    pendingTx: new Map(),
+    rxSeq: 0,
+    unacked: null,
     waiters: []
   };
   sessions.set(sessionId, session);
@@ -252,11 +272,16 @@ function handleOpen(body, res) {
       if (responded) return;
       responded = true;
       const outBuf = drainSessionData(session);
+      if (outBuf.length > 0) {
+        session.rxSeq += 1;
+        session.unacked = { seq: session.rxSeq, buf: outBuf };
+      }
       sendJson(res, 200, {
         ok: true,
         sessionId,
+        rxSeq: outBuf.length > 0 ? session.rxSeq : 0,
         data: outBuf.length ? outBuf.toString('base64') : '',
-        closed: session.closed
+        closed: session.closed && session.chunks.length === 0 && !session.unacked
       });
     }, 60);
   });
@@ -294,14 +319,14 @@ function handleSync(body, res) {
   const sessionId = String(body.sessionId || '');
   const session = sessions.get(sessionId);
   if (!session) {
-    return sendJson(res, 404, { ok: false, error: 'Session not found', closed: true });
+    return sendJson(res, 404, { ok: false, sessionError: true, error: 'Session not found', closed: true });
   }
 
   session.lastActivity = Date.now();
 
   if ((body.dataZ || body.data) && !session.closed) {
     const txSeq = Number.isInteger(body.txSeq) ? body.txSeq : 0;
-    if (txSeq > 0 && txSeq <= session.lastTxSeq) {
+    if (txSeq > 0 && (txSeq < session.nextTxSeq || session.pendingTx.has(txSeq))) {
       // Duplicate retried chunk — skip socket.write to protect TLS/TCP stream integrity
     } else {
       try {
@@ -311,13 +336,35 @@ function handleSync(body, res) {
         } else {
           writeBuf = Buffer.from(body.data, 'base64');
         }
-        if (writeBuf.length > 0) {
+        if (txSeq > 0) {
+          if (session.pendingTx.size < 32) {
+            session.pendingTx.set(txSeq, writeBuf);
+          }
+          while (session.pendingTx.has(session.nextTxSeq)) {
+            const ordered = session.pendingTx.get(session.nextTxSeq);
+            session.pendingTx.delete(session.nextTxSeq);
+            if (ordered.length > 0) session.socket.write(ordered);
+            session.nextTxSeq += 1;
+          }
+        } else if (writeBuf.length > 0) {
           session.socket.write(writeBuf);
         }
-        if (txSeq > 0) session.lastTxSeq = txSeq;
       } catch (err) {
         return sendJson(res, 400, { ok: false, error: 'Invalid payload data' });
       }
+    }
+  }
+
+  if (body.txFin && !session.closed) {
+    try {
+      session.socket.end();
+    } catch (_) {}
+  }
+
+  const hasAck = Number.isInteger(body.ackSeq);
+  if (!body.txOnly && session.unacked) {
+    if (!hasAck || body.ackSeq >= session.unacked.seq) {
+      session.unacked = null;
     }
   }
 
@@ -326,10 +373,25 @@ function handleSync(body, res) {
 
   const finish = () => {
     if (body.txOnly) {
-      return sendJson(res, 200, { ok: true, data: '', closed: session.closed });
+      const txClosed = session.closed && session.chunks.length === 0 && !session.unacked;
+      return sendJson(res, 200, { ok: true, data: '', closed: txClosed });
     }
-    const outBuf = drainSessionData(session);
-    const isClosed = session.closed && session.chunks.length === 0;
+    let outBuf;
+    let outSeq = session.rxSeq;
+    if (session.unacked && hasAck && body.ackSeq < session.unacked.seq) {
+      outBuf = session.unacked.buf;
+      outSeq = session.unacked.seq;
+    } else {
+      outBuf = drainSessionData(session);
+      if (outBuf.length > 0) {
+        session.rxSeq += 1;
+        outSeq = session.rxSeq;
+        if (hasAck) {
+          session.unacked = { seq: outSeq, buf: outBuf };
+        }
+      }
+    }
+    const isClosed = session.closed && session.chunks.length === 0 && !session.unacked;
     if (isClosed) {
       sessions.delete(sessionId);
     }
@@ -338,18 +400,19 @@ function handleSync(body, res) {
       try {
         const gz = zlib.gzipSync(outBuf, { level: 1 });
         if (gz.length < outBuf.length) {
-          return sendJson(res, 200, { ok: true, dataZ: gz.toString('base64'), closed: isClosed });
+          return sendJson(res, 200, { ok: true, rxSeq: outSeq, dataZ: gz.toString('base64'), closed: isClosed });
         }
       } catch (_) {}
     }
     sendJson(res, 200, {
       ok: true,
+      rxSeq: outSeq,
       data: outBuf.length ? outBuf.toString('base64') : '',
       closed: isClosed
     });
   };
 
-  if (session.chunks.length > 0 || session.closed || waitMs === 0) {
+  if (session.unacked || session.chunks.length > 0 || session.closed || waitMs === 0) {
     return finish();
   }
 
@@ -375,6 +438,11 @@ setInterval(() => {
   for (const [id, session] of sessions.entries()) {
     if (now - session.lastActivity > SESSION_IDLE_MS) {
       closeSession(id);
+    }
+  }
+  for (const [oid, meta] of openIdMap.entries()) {
+    if (now - meta.createdAt > 120000) {
+      openIdMap.delete(oid);
     }
   }
 }, 30000).unref();

@@ -101,13 +101,14 @@ def set_windows_system_proxy(enable: bool, host: str = "127.0.0.1", port: int = 
 
 # Free Gmail Google Apps Script limits: 30 concurrent, 20,000 UrlFetch/day
 GAS_QUOTA_PRESETS = {
+    "Auto (Standard Adaptive)": (18, 16000, 140),
     "Low (Safe: 10 conc | 8k/day | 60 rpm)": (10, 8000, 60),
     "Medium (Balanced: 18 conc | 14k/day | 120 rpm)": (18, 14000, 120),
     "High (Fast: 24 conc | 18k/day | 180 rpm)": (24, 18000, 180),
     "X-High (Max Free: 28 conc | 19.5k/day | 240 rpm)": (28, 19500, 240),
     "Unlimited (Max Speed: No Client Limit)": (999, 1000000, 999999),
 }
-DEFAULT_PRESET = "Medium (Balanced: 18 conc | 14k/day | 120 rpm)"
+DEFAULT_PRESET = "Auto (Standard Adaptive)"
 
 DEFAULT_CONFIG = {
     "auth_key": "change-me-freednet-key",
