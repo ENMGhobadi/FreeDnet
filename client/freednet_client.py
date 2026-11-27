@@ -141,6 +141,7 @@ class FreeDnetProWindow(QMainWindow):
         self._spin_idx = 0
         self.proxy = None
         self.xray_proc = None
+        self.chain_proc = None
         self.tun_active = False
         self.sys_proxy_active = False
         self.log_queue: queue.Queue[str] = queue.Queue()
@@ -251,6 +252,7 @@ class FreeDnetProWindow(QMainWindow):
                 set_windows_system_proxy(False)
                 self.sys_proxy_active = False
             self._stop_tun_process()
+            self._stop_chain_xray()
             self._save_config()
             if self.proxy and self.proxy.running:
                 self.proxy.stop()
@@ -278,6 +280,7 @@ class FreeDnetProWindow(QMainWindow):
                 set_windows_system_proxy(False)
                 self.sys_proxy_active = False
             self._stop_tun_process()
+            self._stop_chain_xray()
             self._save_config()
             if self.proxy and self.proxy.running:
                 self.proxy.stop()
@@ -671,13 +674,13 @@ class FreeDnetProWindow(QMainWindow):
         c_lay3 = FlowLayout(margin=0, h_spacing=10, v_spacing=8)
         self.chk_chain_enabled = QCheckBox(self._t("chain_enable"))
         self.chk_chain_enabled.setChecked(bool(self.config.get("chain_enabled", False)))
-        self.chk_chain_enabled.toggled.connect(lambda _: self._save_config())
+        self.chk_chain_enabled.toggled.connect(lambda _: self._on_chain_change())
         c_lay3.addWidget(self.chk_chain_enabled)
 
         self.chain_uri_edit = QLineEdit(self.config.get("chain_uri", ""))
         self.chain_uri_edit.setPlaceholderText(self._t("chain_uri_ph"))
         self.chain_uri_edit.setMinimumWidth(360)
-        self.chain_uri_edit.editingFinished.connect(self._save_config)
+        self.chain_uri_edit.editingFinished.connect(self._on_chain_change)
         c_lay3.addWidget(self.chain_uri_edit)
         cfg_vlay.addLayout(c_lay3)
         set_lay.addWidget(cfg_card)
@@ -908,7 +911,7 @@ class FreeDnetProWindow(QMainWindow):
             if self.tun_active:
                 self.log("Reloading TUN Mode to apply Per-App Routing rules...")
                 self._stop_tun_process()
-                self._start_tun_now()
+                self.toggle_tun_mode()
 
     def _on_target_change(self, val: str):
         if not val:
@@ -1627,8 +1630,8 @@ class FreeDnetProWindow(QMainWindow):
         if not (self.proxy and self.proxy.running):
             QMessageBox.information(self, "Proxy Stopped", "Click 'Start Proxy' first.")
             return
-        host = self.config["listen_host"]
-        port = self.config["listen_port"]
+        host = "127.0.0.1" if self._is_chain_active() else self.config["listen_host"]
+        port = self._effective_socks_port()
 
         def worker():
             tid = self._start_busy("Testing E2E proxy...")
@@ -1667,6 +1670,7 @@ class FreeDnetProWindow(QMainWindow):
                 self.sys_proxy_btn.setObjectName("")
                 self.sys_proxy_btn.style().unpolish(self.sys_proxy_btn)
                 self.sys_proxy_btn.style().polish(self.sys_proxy_btn)
+            self._stop_chain_xray()
             self.proxy.stop()
             self.proxy = None
             self._save_config()
@@ -1718,6 +1722,8 @@ class FreeDnetProWindow(QMainWindow):
             self.start_btn.setText(self._t("stop_proxy"))
             self.start_btn.style().unpolish(self.start_btn)
             self.start_btn.style().polish(self.start_btn)
+            if self._is_chain_active() and not self.tun_active:
+                self._start_chain_xray_async()
         except Exception as e:
             self.notify(f"Proxy Start Failed: {e}", "error", 6000)
             QMessageBox.critical(self, "Start Failed", str(e))
@@ -1760,8 +1766,8 @@ class FreeDnetProWindow(QMainWindow):
 
     def check_country_ip(self):
         via_proxy = bool(self.proxy and self.proxy.running)
-        host = self.config["listen_host"]
-        port = self.config["listen_port"]
+        host = "127.0.0.1" if self._is_chain_active() else self.config["listen_host"]
+        port = self._effective_socks_port()
 
         def worker():
             tid = self._start_busy("Checking Exit IP & Country...")
@@ -1890,28 +1896,39 @@ class FreeDnetProWindow(QMainWindow):
                     "outboundTag": srv_tag_map[srv_name],
                 })
 
+        chain_active = self._is_chain_active()
+        inbounds = [
+            {
+                "tag": "tun-in",
+                "protocol": "tun",
+                "settings": {
+                    "name": "FreeDnetTUN",
+                    "desc": "FreeDnet",
+                    "mtu": 1400,
+                    "gateway": ["10.0.0.1/16"],
+                    "dns": ["1.1.1.1", "8.8.8.8"],
+                    "autoSystemRoutingTable": ["0.0.0.0/0"],
+                    "autoOutboundsInterface": "auto",
+                },
+                "sniffing": {"enabled": True, "destOverride": ["http", "tls", "quic"]},
+            }
+        ]
+        if chain_active:
+            inbounds.append({
+                "tag": "chain-socks-in",
+                "listen": "127.0.0.1",
+                "port": port + 1,
+                "protocol": "socks",
+                "settings": {"auth": "noauth", "udp": False},
+            })
+
         cfg = {
-            "log": {"loglevel": "none"},
-            "inbounds": [
-                {
-                    "tag": "tun-in",
-                    "protocol": "tun",
-                    "settings": {
-                        "name": "FreeDnetTUN",
-                        "desc": "FreeDnet",
-                        "mtu": 1400,
-                        "gateway": ["10.0.0.1/16"],
-                        "dns": ["1.1.1.1", "8.8.8.8"],
-                        "autoSystemRoutingTable": ["0.0.0.0/0"],
-                        "autoOutboundsInterface": "auto",
-                    },
-                    "sniffing": {"enabled": True, "destOverride": ["http", "tls", "quic"]},
-                }
-            ],
+            "log": {"loglevel": "warning"},
+            "inbounds": inbounds,
             "outbounds": [
                 *(
                     [parse_chain_uri(self.config.get("chain_uri", ""), dialer_proxy="freednet-socks")]
-                    if self.config.get("chain_enabled") and self.config.get("chain_uri", "").strip()
+                    if chain_active
                     else []
                 ),
                 *app_outbounds,
@@ -1926,6 +1943,11 @@ class FreeDnetProWindow(QMainWindow):
             "routing": {
                 "domainStrategy": "IPIfNonMatch",
                 "rules": [
+                    *(
+                        [{"type": "field", "inboundTag": ["chain-socks-in"], "outboundTag": "chain-out"}]
+                        if chain_active
+                        else []
+                    ),
                     {"type": "field", "process": ["FreeDnet.exe", "python.exe", "pythonw.exe"], "outboundTag": "direct"},
                     {"type": "field", "port": "53", "outboundTag": "direct"},
                     {"type": "field", "ip": ["geoip:private", "127.0.0.1/8"], "outboundTag": "direct"},
@@ -1944,7 +1966,7 @@ class FreeDnetProWindow(QMainWindow):
                     {
                         "type": "field",
                         "network": "tcp",
-                        "outboundTag": "chain-out" if (self.config.get("chain_enabled") and self.config.get("chain_uri", "").strip()) else "freednet-socks",
+                        "outboundTag": "chain-out" if chain_active else "freednet-socks",
                     },
                     {"type": "field", "network": "udp", "outboundTag": "block"},
                 ],
@@ -1952,6 +1974,130 @@ class FreeDnetProWindow(QMainWindow):
         }
         with open(XRAY_TUN_CFG, "w", encoding="utf-8") as f:
             json.dump(cfg, f, indent=2)
+
+    def _is_chain_active(self) -> bool:
+        return bool(self.config.get("chain_enabled") and (self.config.get("chain_uri") or "").strip())
+
+    def _effective_socks_port(self) -> int:
+        base = int(self.config.get("listen_port", 1080))
+        if self._is_chain_active() and (
+            (self.tun_active and self.xray_proc is not None and self.xray_proc.poll() is None)
+            or (self.chain_proc is not None and self.chain_proc.poll() is None)
+        ):
+            return base + 1
+        return base
+
+    def _write_chain_only_config(self) -> str:
+        host = self.config["listen_host"]
+        port = int(self.config["listen_port"])
+        cfg_path = os.path.join(XRAY_DIR, "chain_config.json")
+        os.makedirs(XRAY_DIR, exist_ok=True)
+        cfg = {
+            "log": {"loglevel": "warning"},
+            "inbounds": [
+                {
+                    "tag": "chain-socks-in",
+                    "listen": "127.0.0.1",
+                    "port": port + 1,
+                    "protocol": "socks",
+                    "settings": {"auth": "noauth", "udp": False},
+                }
+            ],
+            "outbounds": [
+                parse_chain_uri(self.config.get("chain_uri", ""), dialer_proxy="freednet-socks"),
+                {
+                    "tag": "freednet-socks",
+                    "protocol": "socks",
+                    "settings": {"servers": [{"address": host, "port": port}]},
+                },
+            ],
+            "routing": {
+                "rules": [
+                    {"type": "field", "inboundTag": ["chain-socks-in"], "outboundTag": "chain-out"},
+                ]
+            },
+        }
+        with open(cfg_path, "w", encoding="utf-8") as f:
+            json.dump(cfg, f, indent=2)
+        return cfg_path
+
+    def _stop_chain_xray(self):
+        if self.chain_proc is not None:
+            try:
+                self.chain_proc.terminate()
+                self.chain_proc.wait(timeout=3)
+            except Exception:
+                try:
+                    self.chain_proc.kill()
+                except Exception:
+                    pass
+            self.chain_proc = None
+
+    def _start_chain_xray_async(self):
+        if sys.platform != "win32":
+            return
+        try:
+            parse_chain_uri(self.config.get("chain_uri", ""))
+        except Exception as e:
+            self.notify(f"Invalid Outbound Chain URI: {e}", "error", 6000)
+            return
+
+        def worker():
+            tid = self._start_busy("Starting Outbound Chain (Xray)...")
+            try:
+                os.makedirs(XRAY_DIR, exist_ok=True)
+                if not os.path.exists(XRAY_EXE):
+                    self.log("Downloading Xray-core for Outbound Chain...")
+                    zbytes = self._download_with_fallback(XRAY_ZIP_URL)
+                    with zipfile.ZipFile(io.BytesIO(zbytes)) as zf:
+                        for member in zf.namelist():
+                            if os.path.basename(member) == "xray.exe":
+                                with open(XRAY_EXE, "wb") as out:
+                                    out.write(zf.read(member))
+                                break
+                self._stop_chain_xray()
+                cfg_path = self._write_chain_only_config()
+                flags = getattr(subprocess, "CREATE_NO_WINDOW", 0)
+                self.chain_proc = subprocess.Popen(
+                    [XRAY_EXE, "run", "-c", cfg_path],
+                    cwd=XRAY_DIR,
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.STDOUT,
+                    text=True,
+                    creationflags=flags,
+                )
+                time.sleep(1.0)
+                if self.chain_proc.poll() is not None:
+                    out, _ = self.chain_proc.communicate(timeout=2)
+                    err_line = " | ".join(ln.strip() for ln in out.splitlines() if ln.strip())[-200:]
+                    self.chain_proc = None
+                    raise RuntimeError(err_line or "xray.exe exited unexpectedly")
+                cport = int(self.config["listen_port"]) + 1
+                self.log(f"Outbound Chain ACTIVE on 127.0.0.1:{cport} -> FreeDnet -> VLESS/Trojan")
+                self.notify(f"Outbound Chain ACTIVE (port {cport})", "success", 4000)
+                if self.sys_proxy_active:
+                    set_windows_system_proxy(True, "127.0.0.1", cport)
+            except Exception as e:
+                self.log(f"Outbound Chain FAILED -> {e}")
+                self.notify(f"Outbound Chain FAILED: {e}", "error", 6000)
+            finally:
+                self._stop_busy(tid)
+
+        threading.Thread(target=worker, daemon=True).start()
+
+    def _on_chain_change(self):
+        self._save_config()
+        if self.tun_active:
+            self.log("Reloading TUN Mode for Outbound Chain changes...")
+            self._stop_tun_process()
+            self.toggle_tun_mode()
+        elif self.proxy and self.proxy.running:
+            if self._is_chain_active():
+                self._start_chain_xray_async()
+            else:
+                self._stop_chain_xray()
+                if self.sys_proxy_active:
+                    set_windows_system_proxy(True, self.config["listen_host"], int(self.config["listen_port"]))
 
     def _stop_tun_process(self):
         if self.xray_proc is not None:
@@ -1987,8 +2133,8 @@ class FreeDnetProWindow(QMainWindow):
         if not (self.proxy and self.proxy.running):
             QMessageBox.warning(self, "Start Proxy First", "Please click 'Start Proxy' first.")
             return
-        host = self.config["listen_host"]
-        port = int(self.config["listen_port"])
+        host = "127.0.0.1" if self._is_chain_active() else self.config["listen_host"]
+        port = self._effective_socks_port()
         if set_windows_system_proxy(True, host, port):
             self.sys_proxy_active = True
             self.sys_proxy_btn.setText(self._t("sys_proxy_on"))
@@ -2000,6 +2146,7 @@ class FreeDnetProWindow(QMainWindow):
     def toggle_tun_mode(self):
         if self.tun_active:
             self._stop_tun_process()
+            self._stop_chain_xray()
             self.tun_btn.setText(self._t("tun_off"))
             self.tun_btn.setObjectName("")
             self.tun_btn.style().unpolish(self.tun_btn)
@@ -2062,6 +2209,7 @@ class FreeDnetProWindow(QMainWindow):
                 ok = self._ensure_xray_tun_assets()
                 if not ok:
                     raise RuntimeError("Failed to prepare xray.exe or wintun.dll")
+                self._stop_chain_xray()
                 self._write_tun_config()
                 flags = getattr(subprocess, "CREATE_NO_WINDOW", 0)
                 self.xray_proc = subprocess.Popen(
