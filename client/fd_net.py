@@ -28,10 +28,11 @@ def detect_server_provider(srv: "BackendServer") -> str:
 
 
 class BackendServer:
-    def __init__(self, name: str, url: str, enabled: bool = True):
+    def __init__(self, name: str, url: str, enabled: bool = True, deploy_meta: dict | None = None):
         self.name = name
         self.url = url.strip().rstrip("/")
         self.enabled = enabled
+        self.deploy_meta = dict(deploy_meta) if isinstance(deploy_meta, dict) else {}
         self.active = 0
         self.total_requests = 0
         self.errors = 0
@@ -41,7 +42,10 @@ class BackendServer:
         self.last_error = ""
 
     def to_dict(self):
-        return {"name": self.name, "url": self.url, "enabled": self.enabled}
+        d = {"name": self.name, "url": self.url, "enabled": self.enabled}
+        if self.deploy_meta:
+            d["deploy_meta"] = self.deploy_meta
+        return d
 
     @property
     def status_label(self) -> str:
@@ -77,6 +81,7 @@ class ServerPool:
                     name=item.get("name", f"Server {i + 1}"),
                     url=item.get("url", ""),
                     enabled=bool(item.get("enabled", True)),
+                    deploy_meta=item.get("deploy_meta"),
                 )
                 for i, item in enumerate(items)
                 if item.get("url", "").strip()
