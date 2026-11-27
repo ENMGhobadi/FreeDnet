@@ -302,6 +302,8 @@ class GasAccountPool:
                     acc.consecutive_rate_limits += 1
                     cd = min(120, 15 * (2 ** (acc.consecutive_rate_limits - 1)))
                     acc.cooldown_until = time.time() + cd
+                else:
+                    acc.cooldown_until = max(acc.cooldown_until, time.time() + 3.0)
             self.lock.notify_all()
 
 
@@ -362,22 +364,36 @@ class KeepAlivePool:
 
     def _acquire(self, scheme: str, host: str, port: int, timeout: float):
         key = (scheme, host, port)
+        now = time.time()
+        stale = []
+        chosen = None
         with self._lock:
             bucket = self._conns.get(key)
-            if bucket:
-                conn = bucket.pop()
-                conn.timeout = timeout
-                return conn
+            while bucket:
+                conn, ts = bucket.pop()
+                if now - ts <= 15.0:
+                    chosen = conn
+                    break
+                stale.append(conn)
+        for c in stale:
+            try:
+                c.close()
+            except Exception:
+                pass
+        if chosen is not None:
+            chosen.timeout = timeout
+            return chosen
         if scheme == "https":
             return http.client.HTTPSConnection(host, port, timeout=timeout, context=self._ssl_ctx)
         return http.client.HTTPConnection(host, port, timeout=timeout)
 
     def _release(self, scheme: str, host: str, port: int, conn):
         key = (scheme, host, port)
+        now = time.time()
         with self._lock:
             bucket = self._conns.setdefault(key, [])
-            if len(bucket) < 48:
-                bucket.append(conn)
+            if len(bucket) < 64:
+                bucket.append((conn, now))
                 return
         try:
             conn.close()
@@ -416,7 +432,7 @@ class KeepAlivePool:
                 else:
                     self._release(scheme, host, port, conn)
                 return status, raw, location
-            except (http.client.HTTPException, OSError, BrokenPipeError):
+            except (http.client.HTTPException, ssl.SSLError, OSError, BrokenPipeError):
                 try:
                     conn.close()
                 except Exception:
@@ -456,7 +472,7 @@ def post_direct_to_server(server_url: str, payload: dict, auth_key: str, timeout
             return json.loads(raw)
         try:
             parsed = json.loads(raw)
-            if code >= 500:
+            if code >= 500 and not parsed.get("targetError"):
                 parsed["upstreamError"] = True
             return parsed
         except Exception:

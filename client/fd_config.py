@@ -183,7 +183,18 @@ def parse_chain_uri(raw_uri: str, dialer_proxy: str = "freednet-socks") -> dict:
             "spiderX": urllib.parse.unquote(q("spx", "")) or "/",
         }
 
-    if net_type == "ws":
+    if net_type == "tcp" and q("headerType", "").lower() == "http":
+        tcp_host = [h.strip() for h in (q("host", "") or sni).split(",") if h.strip()]
+        stream["tcpSettings"] = {
+            "header": {
+                "type": "http",
+                "request": {
+                    "path": [urllib.parse.unquote(q("path", "/")) or "/"],
+                    "headers": {"Host": tcp_host} if tcp_host else {},
+                },
+            }
+        }
+    elif net_type == "ws":
         ws_path = urllib.parse.unquote(q("path", "/")) or "/"
         ws_host = q("host", "") or sni
         stream["wsSettings"] = {"path": ws_path, "headers": {"Host": ws_host} if ws_host else {}}
