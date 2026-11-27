@@ -13,6 +13,7 @@ import subprocess
 import sys
 import threading
 import time
+import urllib.parse
 import uuid
 
 from fd_config import BASE_DIR
@@ -20,6 +21,7 @@ from fd_net import (
     BackendServer,
     GasAccountPool,
     ServerPool,
+    WebSocketTunnelClient,
     post_direct_to_server,
     post_to_gas,
 )
@@ -402,7 +404,12 @@ class FreeDnetProxyServer:
     def _http_fetch_with_failover(self, url: str, method: str, headers: dict, req_body: bytes) -> dict:
         if req_body and len(req_body) > 2_800_000:
             return {"ok": False, "status": 413, "error": "Request body exceeds 2.8 MB MITM relay limit"}
-        candidates = self.server_pool.get_candidates(require_explicit=(self.route_mode == "direct"))
+        try:
+            u_p = urllib.parse.urlsplit(url)
+            t_port = u_p.port or (443 if u_p.scheme.lower() == "https" else 80)
+        except Exception:
+            t_port = None
+        candidates = self.server_pool.get_candidates(require_explicit=(self.route_mode == "direct"), target_port=t_port)
         if not candidates:
             return {"ok": False, "error": "No enabled backend servers available"}
 
@@ -581,6 +588,73 @@ class FreeDnetProxyServer:
             if not keep_alive:
                 return
 
+    def _open_ws_with_failover(
+        self, host: str, port: int, preferred_server: str = ""
+    ) -> tuple[WebSocketTunnelClient | None, BackendServer | None]:
+        candidates = []
+        if preferred_server:
+            with self.server_pool.lock:
+                for s in self.server_pool.servers:
+                    if s.enabled and s.name == preferred_server:
+                        candidates = [s]
+                        break
+        if not candidates:
+            candidates = self.server_pool.get_candidates(require_explicit=True, target_port=port)
+        for srv in candidates:
+            if srv is None:
+                continue
+            try:
+                t0 = time.time()
+                ws = WebSocketTunnelClient.connect(srv.url, host, port, self.auth_key, timeout=12.0)
+                lat = max(1, int((time.time() - t0) * 1000))
+                self.server_pool.report_success(srv, lat)
+                return ws, srv
+            except Exception:
+                continue
+        return None, None
+
+    def _relay_ws_loop(self, client_sock: socket.socket, ws: WebSocketTunnelClient, pinned_backend: BackendServer | None):
+        closed_evt = threading.Event()
+        if pinned_backend is not None:
+            self.server_pool.acquire_slot(pinned_backend, timeout=2.0)
+
+        def tx_worker():
+            try:
+                client_sock.settimeout(30.0)
+                while self.running and not closed_evt.is_set():
+                    rlist, _, _ = select.select([client_sock], [], [], 0.05)
+                    if not rlist:
+                        continue
+                    data = client_sock.recv(65536)
+                    if not data:
+                        return
+                    ws.send_binary(data)
+                    with self._stat_lock:
+                        self.tx_bytes += len(data)
+            except Exception:
+                pass
+
+        tx_t = threading.Thread(target=tx_worker, daemon=True)
+        tx_t.start()
+        try:
+            ws.sock.settimeout(60.0)
+            while self.running and not closed_evt.is_set():
+                data = ws.recv_binary()
+                if data is None:
+                    return
+                if data:
+                    client_sock.sendall(data)
+                    with self._stat_lock:
+                        self.rx_bytes += len(data)
+        except Exception:
+            pass
+        finally:
+            closed_evt.set()
+            ws.close()
+            if pinned_backend is not None:
+                self.server_pool.release_slot(pinned_backend)
+            tx_t.join(timeout=0.5)
+
     def _open_with_failover(
         self, host: str, port: int, init_b64: str, preferred_server: str = ""
     ) -> tuple[dict, BackendServer | None]:
@@ -592,7 +666,7 @@ class FreeDnetProxyServer:
                         candidates = [s]
                         break
         if not candidates:
-            candidates = self.server_pool.get_candidates(require_explicit=(self.route_mode == "direct"))
+            candidates = self.server_pool.get_candidates(require_explicit=(self.route_mode == "direct"), target_port=port)
         if not candidates:
             return {"ok": False, "error": "No enabled backend servers available"}, None
 
@@ -707,6 +781,20 @@ class FreeDnetProxyServer:
                 else:
                     self._mitm_http_loop(client_sock, "http", host, port, initial_buf=initial_data)
                 return
+            if self.route_mode == "direct":
+                ws_client, ws_srv = self._open_ws_with_failover(host, port, preferred_server=pinned_server_name)
+                if ws_client is not None:
+                    if is_socks5:
+                        client_sock.sendall(b"\x05\x00\x00\x01\x00\x00\x00\x00\x00\x00")
+                    elif is_http_connect:
+                        client_sock.sendall(b"HTTP/1.1 200 Connection Established\r\n\r\n")
+                    if initial_data:
+                        ws_client.send_binary(initial_data)
+                        with self._stat_lock:
+                            self.tx_bytes += len(initial_data)
+                    self._relay_ws_loop(client_sock, ws_client, ws_srv)
+                    return
+
             init_b64 = base64.b64encode(initial_data).decode("ascii") if initial_data else ""
             if initial_data:
                 with self._stat_lock:

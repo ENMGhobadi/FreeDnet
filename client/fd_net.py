@@ -2,8 +2,13 @@
 
 from collections import deque
 import http.client
+import base64
+import hashlib
 import json
+import os
+import socket
 import ssl
+import struct
 import threading
 import time
 import urllib.parse
@@ -111,7 +116,7 @@ class ServerPool:
         with self.lock:
             self.server_mode = mode or "priority"
 
-    def get_candidates(self, require_explicit: bool = False) -> list[BackendServer | None]:
+    def get_candidates(self, require_explicit: bool = False, target_port: int | None = None) -> list[BackendServer | None]:
         with self.lock:
             now = time.time()
             enabled = [s for s in self.servers if s.enabled and s.url]
@@ -136,6 +141,18 @@ class ServerPool:
 
             healthy = [s for s in enabled if now >= s.cooldown_until]
             cooldown = sorted([s for s in enabled if now < s.cooldown_until], key=lambda s: s.cooldown_until)
+
+            if self.server_mode == "auto" and target_port is not None:
+                if target_port in (80, 443):
+                    # Cloudflare Free handles 80/443 fastest at the edge; other servers act as fallback
+                    cf_h = sorted([s for s in healthy if detect_server_provider(s) == "cloudflare"], key=lambda s: (s.active, s.consecutive_failures, s.total_requests))
+                    other_h = sorted([s for s in healthy if detect_server_provider(s) != "cloudflare"], key=lambda s: (s.active, s.consecutive_failures, s.total_requests))
+                    return cf_h + other_h + cooldown
+                else:
+                    # Non-80/443 ports require Render/SnapDeploy/Custom (Cloudflare Free blocks other ports)
+                    other_h = sorted([s for s in healthy if detect_server_provider(s) != "cloudflare"], key=lambda s: (s.active, s.consecutive_failures, s.total_requests))
+                    cf_h = sorted([s for s in healthy if detect_server_provider(s) == "cloudflare"], key=lambda s: (s.active, s.consecutive_failures, s.total_requests))
+                    return other_h + cf_h + cooldown
 
             if self.server_mode in ("fair", "auto"):
                 healthy.sort(key=lambda s: (s.active, s.consecutive_failures, s.total_requests))
@@ -571,3 +588,154 @@ def post_direct_to_server(server_url: str, payload: dict, auth_key: str, timeout
             }
     except Exception as e:
         return {"ok": False, "upstreamError": True, "error": str(e)}
+
+
+
+class WebSocketTunnelClient:
+    """Pure-Python RFC 6455 binary WebSocket client for full-duplex Direct Mode tunneling."""
+
+    _SSL_CTX = ssl.create_default_context()
+
+    def __init__(self, sock: socket.socket, buf: bytes = b""):
+        self.sock = sock
+        self._buf = bytearray(buf)
+        self._send_lock = threading.Lock()
+        self.closed = False
+
+    @classmethod
+    def connect(cls, server_url: str, target_host: str, target_port: int, auth_key: str, timeout: float = 15.0) -> "WebSocketTunnelClient":
+        parsed = urllib.parse.urlsplit(server_url.strip().rstrip("/"))
+        scheme = parsed.scheme.lower()
+        host = parsed.hostname
+        port = parsed.port or (443 if scheme == "https" else 80)
+        base_path = parsed.path.rstrip("/")
+        if base_path.endswith("/tunnel"):
+            base_path = base_path[:-7]
+        ws_path = f"{base_path}/ws?host={urllib.parse.quote(target_host)}&port={int(target_port)}"
+
+        raw_sock = socket.create_connection((host, port), timeout=timeout)
+        raw_sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
+        if scheme == "https":
+            sock = cls._SSL_CTX.wrap_socket(raw_sock, server_hostname=host)
+        else:
+            sock = raw_sock
+
+        ws_key = base64.b64encode(os.urandom(16)).decode("ascii")
+        host_hdr = f"{host}:{port}" if parsed.port else host
+        req = (
+            f"GET {ws_path} HTTP/1.1\r\n"
+            f"Host: {host_hdr}\r\n"
+            f"Upgrade: websocket\r\n"
+            f"Connection: Upgrade\r\n"
+            f"Sec-WebSocket-Key: {ws_key}\r\n"
+            f"Sec-WebSocket-Version: 13\r\n"
+            f"X-Auth-Key: {auth_key}\r\n"
+            f"User-Agent: FreeDnet-Client/2.0\r\n\r\n"
+        ).encode("ascii")
+        sock.sendall(req)
+
+        buf = bytearray()
+        while b"\r\n\r\n" not in buf:
+            chunk = sock.recv(4096)
+            if not chunk:
+                sock.close()
+                raise RuntimeError("WebSocket handshake EOF")
+            buf.extend(chunk)
+            if len(buf) > 32768:
+                sock.close()
+                raise RuntimeError("WebSocket handshake header too large")
+
+        sep = buf.index(b"\r\n\r\n")
+        head = bytes(buf[:sep]).decode("latin-1", errors="replace")
+        rest = bytes(buf[sep + 4:])
+        status_line = head.split("\r\n", 1)[0]
+        if " 101 " not in status_line:
+            sock.close()
+            raise RuntimeError(f"WS upgrade rejected: {status_line}")
+
+        expected_accept = base64.b64encode(
+            hashlib.sha1((ws_key + "258EAFA5-E914-47DA-95CA-C5AB0DC85B11").encode("ascii")).digest()
+        ).decode("ascii")
+        if expected_accept not in head:
+            sock.close()
+            raise RuntimeError("Invalid Sec-WebSocket-Accept")
+
+        return cls(sock, rest)
+
+    def _send_frame(self, opcode: int, payload: bytes):
+        if self.closed:
+            return
+        n = len(payload)
+        mask = os.urandom(4)
+        if n < 126:
+            hdr = bytes([0x80 | (opcode & 0x0F), 0x80 | n]) + mask
+        elif n < 65536:
+            hdr = struct.pack("!BBH", 0x80 | (opcode & 0x0F), 0x80 | 126, n) + mask
+        else:
+            hdr = struct.pack("!BBQ", 0x80 | (opcode & 0x0F), 0x80 | 127, n) + mask
+
+        if n > 0:
+            rep = (mask * ((n + 3) // 4))[:n]
+            masked = (int.from_bytes(payload, "little") ^ int.from_bytes(rep, "little")).to_bytes(n, "little")
+            frame = hdr + masked
+        else:
+            frame = hdr
+
+        with self._send_lock:
+            self.sock.sendall(frame)
+
+    def send_binary(self, data: bytes):
+        if data:
+            self._send_frame(0x2, data)
+
+    def _read_exact(self, n: int) -> bytes:
+        while len(self._buf) < n:
+            chunk = self.sock.recv(max(4096, n - len(self._buf)))
+            if not chunk:
+                raise EOFError("WebSocket closed")
+            self._buf.extend(chunk)
+        out = bytes(self._buf[:n])
+        del self._buf[:n]
+        return out
+
+    def recv_binary(self) -> bytes | None:
+        while not self.closed:
+            hdr = self._read_exact(2)
+            opcode = hdr[0] & 0x0F
+            masked = (hdr[1] & 0x80) != 0
+            length = hdr[1] & 0x7F
+            if length == 126:
+                length = struct.unpack("!H", self._read_exact(2))[0]
+            elif length == 127:
+                length = struct.unpack("!Q", self._read_exact(8))[0]
+            mask_key = self._read_exact(4) if masked else None
+            payload = self._read_exact(length) if length > 0 else b""
+            if masked and mask_key and payload:
+                rep = (mask_key * ((length + 3) // 4))[:length]
+                payload = (int.from_bytes(payload, "little") ^ int.from_bytes(rep, "little")).to_bytes(length, "little")
+            if opcode == 0x8:
+                return None
+            if opcode == 0x9:
+                try:
+                    self._send_frame(0xA, payload)
+                except Exception:
+                    pass
+                continue
+            if opcode == 0xA:
+                continue
+            if opcode in (0x1, 0x2, 0x0):
+                return payload
+        return None
+
+    def close(self):
+        if self.closed:
+            return
+        self.closed = True
+        try:
+            self._send_frame(0x8, b"")
+        except Exception:
+            pass
+        try:
+            self.sock.close()
+        except Exception:
+            pass
