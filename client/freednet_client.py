@@ -248,22 +248,46 @@ class FreeDnetProWindow(QMainWindow):
         self.raise_()
         self.activateWindow()
 
-    def _quit_app(self):
-        self._force_quit = True
+    def _cleanup_on_exit(self):
         try:
             if self.sys_proxy_active:
                 set_windows_system_proxy(False)
                 self.sys_proxy_active = False
+            elif sys.platform == "win32":
+                try:
+                    import winreg
+                    kp = r"Software\Microsoft\Windows\CurrentVersion\Internet Settings"
+                    with winreg.OpenKey(winreg.HKEY_CURRENT_USER, kp, 0, winreg.KEY_READ) as k:
+                        en, _ = winreg.QueryValueEx(k, "ProxyEnable")
+                        srv, _ = winreg.QueryValueEx(k, "ProxyServer")
+                    h = self.config.get("listen_host", "127.0.0.1")
+                    p = int(self.config.get("listen_port", 1080))
+                    if en == 1 and srv in (f"{h}:{p}", f"127.0.0.1:{p + 1}"):
+                        set_windows_system_proxy(False)
+                except Exception:
+                    pass
             self._stop_tun_process()
             self._stop_chain_xray()
+            if sys.platform == "win32":
+                try:
+                    flags = getattr(subprocess, "CREATE_NO_WINDOW", 0x08000000)
+                    subprocess.run(["taskkill", "/F", "/IM", "xray.exe", "/T"], capture_output=True, creationflags=flags, timeout=3)
+                except Exception:
+                    pass
             self._save_config()
             if self.proxy and self.proxy.running:
                 self.proxy.stop()
+                self.proxy = None
             if getattr(self, "tray", None):
                 self.tray.hide()
         except Exception:
             pass
+
+    def _quit_app(self):
+        self._force_quit = True
+        self._cleanup_on_exit()
         QApplication.quit()
+        QTimer.singleShot(150, lambda: os._exit(0))
 
     def closeEvent(self, event):
         if not self._force_quit and getattr(self, "tray", None) and self.tray.isVisible():
@@ -278,18 +302,9 @@ class FreeDnetProWindow(QMainWindow):
                     2500,
                 )
             return
-        try:
-            if self.sys_proxy_active:
-                set_windows_system_proxy(False)
-                self.sys_proxy_active = False
-            self._stop_tun_process()
-            self._stop_chain_xray()
-            self._save_config()
-            if self.proxy and self.proxy.running:
-                self.proxy.stop()
-        except Exception:
-            pass
+        self._cleanup_on_exit()
         event.accept()
+        QTimer.singleShot(150, lambda: os._exit(0))
 
     def _start_busy(self, label: str) -> int:
         with self._busy_lock:
@@ -619,6 +634,7 @@ class FreeDnetProWindow(QMainWindow):
         self.auth_edit = QLineEdit(self.config["auth_key"])
         self.auth_edit.setEchoMode(QLineEdit.Password)
         self.auth_edit.setMinimumWidth(220)
+        self.auth_edit.editingFinished.connect(self._on_auth_or_listen_change)
         c_lay1.addWidget(self.auth_edit)
 
         self.chk_show_key = QCheckBox("Show")
@@ -650,6 +666,7 @@ class FreeDnetProWindow(QMainWindow):
         c_lay2.addWidget(self.lbl_listen_ip)
         self.host_edit = QLineEdit(self.config["listen_host"])
         self.host_edit.setFixedWidth(125)
+        self.host_edit.editingFinished.connect(self._on_auth_or_listen_change)
         c_lay2.addWidget(self.host_edit)
 
         c_lay2.addSpacing(8)
@@ -657,6 +674,7 @@ class FreeDnetProWindow(QMainWindow):
         c_lay2.addWidget(self.lbl_port)
         self.port_edit = QLineEdit(str(self.config["listen_port"]))
         self.port_edit.setFixedWidth(72)
+        self.port_edit.editingFinished.connect(self._on_auth_or_listen_change)
         c_lay2.addWidget(self.port_edit)
 
         c_lay2.addSpacing(12)
@@ -870,6 +888,7 @@ class FreeDnetProWindow(QMainWindow):
         clip = QApplication.clipboard().text().strip()
         if clip:
             self.auth_edit.setText(clip)
+            self._on_auth_or_listen_change()
             self.log("Pasted Auth Key from clipboard.")
 
     def _refresh_target_dropdown(self):
@@ -964,6 +983,7 @@ class FreeDnetProWindow(QMainWindow):
         if str(mode_val) == "auto" or self.preset_combo.currentText() == "Auto (Standard Adaptive)":
             self._apply_auto_tuning(log_it=True)
         self._save_config()
+        self._sync_tables()
         self.log(f"Backend Mode set to: {lbl}")
 
     def _on_gas_mode_change(self, checked: bool):
@@ -974,17 +994,20 @@ class FreeDnetProWindow(QMainWindow):
             conc, daily, rpm = GAS_QUOTA_PRESETS.get(self.preset_combo.currentText(), (18, 14000, 120))
             self.pool.update_limits(conc, daily, rpm, gas_mode=gmode)
         self._save_config()
+        self._sync_tables()
         self.log(f"GAS Quota Distribution: {'Fair-Share (1/N Equal)' if checked else 'Priority (#1 -> #2 Failover)'}")
 
     def _on_preset_change(self, preset: str):
         if preset == "Auto (Standard Adaptive)":
             self._apply_auto_tuning(log_it=True)
             self._save_config()
+            self._sync_tables()
             return
         if preset in GAS_QUOTA_PRESETS:
             conc, daily, rpm = GAS_QUOTA_PRESETS[preset]
             self.pool.update_limits(conc, daily, rpm)
             self._save_config()
+            self._sync_tables()
             self.log(f"GAS Quota Profile: {preset}")
 
     def _on_keep_awake_change(self, val: bool):
@@ -992,6 +1015,28 @@ class FreeDnetProWindow(QMainWindow):
         if self.proxy and self.proxy.running:
             self.proxy.keep_awake = val
             self.log(f"Keep Awake {'enabled' if val else 'disabled'}.")
+
+    def _on_auth_or_listen_change(self):
+        old_host = self.config.get("listen_host", "127.0.0.1")
+        old_port = int(self.config.get("listen_port", 1080))
+        self._save_config()
+        new_key = self.config["auth_key"]
+        new_host = self.config["listen_host"]
+        new_port = int(self.config["listen_port"])
+        if self.proxy and self.proxy.running:
+            self.proxy.auth_key = new_key
+            if new_host != old_host or new_port != old_port:
+                tid = self._start_busy(f"Applying {new_host}:{new_port}...")
+                try:
+                    self.toggle_proxy()
+                    self.toggle_proxy()
+                    if self.sys_proxy_active:
+                        set_windows_system_proxy(True, "127.0.0.1" if self._is_chain_active() else new_host, self._effective_socks_port())
+                    if self.tun_active:
+                        self._stop_tun_process()
+                        self.toggle_tun_mode()
+                finally:
+                    self._stop_busy(tid)
 
     def _apply_theme(self, theme_name: str, save: bool = True):
         theme_name = THEME_ALIASES.get(theme_name, theme_name)
@@ -2400,9 +2445,10 @@ class FreeDnetProWindow(QMainWindow):
                 except Exception:
                     pass
             self.xray_proc = None
-        if sys.platform == "win32" and self.tun_active:
+        if sys.platform == "win32":
             try:
-                subprocess.run(["taskkill", "/F", "/IM", "xray.exe"], capture_output=True)
+                flags = getattr(subprocess, "CREATE_NO_WINDOW", 0x08000000)
+                subprocess.run(["taskkill", "/F", "/IM", "xray.exe", "/T"], capture_output=True, creationflags=flags, timeout=3)
             except Exception:
                 pass
         self.tun_active = False
