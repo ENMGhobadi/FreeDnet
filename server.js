@@ -14,8 +14,8 @@ const PORT = parseInt(process.env.PORT || '3000', 10);
 const AUTH_KEY = process.env.AUTH_KEY || 'change-me-freednet-key';
 const SESSION_IDLE_MS = parseInt(process.env.SESSION_IDLE_MS || '300000', 10); // 5 minutes
 const MAX_BODY_BYTES = 4 * 1024 * 1024; // 4 MB
-const MAX_READ_BUFFER_BYTES = 4 * 1024 * 1024; // 4 MB
-const MAX_SYNC_CHUNK_BYTES = 1536 * 1024; // 1.5 MB
+const MAX_READ_BUFFER_BYTES = 1536 * 1024; // 1.5 MB
+const MAX_SYNC_CHUNK_BYTES = 1024 * 1024; // 1 MB
 
 /** @type {Map<string, {
  *   id: string,
@@ -25,6 +25,7 @@ const MAX_SYNC_CHUNK_BYTES = 1536 * 1024; // 1.5 MB
  *   closed: boolean,
  *   error: string | null,
  *   lastActivity: number,
+ *   lastTxSeq: number,
  *   waiters: Array<() => void>
  * }>} */
 const sessions = new Map();
@@ -221,6 +222,7 @@ function handleOpen(body, res) {
     closed: false,
     error: null,
     lastActivity: Date.now(),
+    lastTxSeq: 0,
     waiters: []
   };
   sessions.set(sessionId, session);
@@ -298,18 +300,24 @@ function handleSync(body, res) {
   session.lastActivity = Date.now();
 
   if ((body.dataZ || body.data) && !session.closed) {
-    try {
-      let writeBuf;
-      if (body.dataZ) {
-        writeBuf = zlib.gunzipSync(Buffer.from(body.dataZ, 'base64'));
-      } else {
-        writeBuf = Buffer.from(body.data, 'base64');
+    const txSeq = Number.isInteger(body.txSeq) ? body.txSeq : 0;
+    if (txSeq > 0 && txSeq <= session.lastTxSeq) {
+      // Duplicate retried chunk — skip socket.write to protect TLS/TCP stream integrity
+    } else {
+      try {
+        let writeBuf;
+        if (body.dataZ) {
+          writeBuf = zlib.gunzipSync(Buffer.from(body.dataZ, 'base64'));
+        } else {
+          writeBuf = Buffer.from(body.data, 'base64');
+        }
+        if (writeBuf.length > 0) {
+          session.socket.write(writeBuf);
+        }
+        if (txSeq > 0) session.lastTxSeq = txSeq;
+      } catch (err) {
+        return sendJson(res, 400, { ok: false, error: 'Invalid payload data' });
       }
-      if (writeBuf.length > 0) {
-        session.socket.write(writeBuf);
-      }
-    } catch (err) {
-      return sendJson(res, 400, { ok: false, error: 'Invalid payload data' });
     }
   }
 
@@ -326,7 +334,7 @@ function handleSync(body, res) {
       sessions.delete(sessionId);
     }
     const looksLikeTls = outBuf.length >= 2 && outBuf[0] >= 0x14 && outBuf[0] <= 0x17 && outBuf[1] === 0x03;
-    if (acceptGzip && !looksLikeTls && outBuf.length > 512 && outBuf.length <= 524288) {
+    if (acceptGzip && !looksLikeTls && outBuf.length > 512 && outBuf.length <= 1048576) {
       try {
         const gz = zlib.gzipSync(outBuf, { level: 1 });
         if (gz.length < outBuf.length) {

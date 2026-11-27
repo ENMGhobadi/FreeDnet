@@ -133,6 +133,7 @@ export class TunnelSessionDO extends DurableObject {
     this.bufferedBytes = 0;
     this.closed = false;
     this.error = null;
+    this.lastTxSeq = 0;
     this.waiters = [];
   }
 
@@ -254,15 +255,21 @@ export class TunnelSessionDO extends DurableObject {
       }
 
       if ((body.dataZ || body.data) && !this.closed && this.writer) {
-        try {
-          const writeBytes = body.dataZ
-            ? await gunzipBytes(base64ToBytes(body.dataZ))
-            : base64ToBytes(body.data);
-          if (writeBytes.length > 0) {
-            await this.writer.write(writeBytes);
+        const txSeq = Number.isInteger(body.txSeq) ? body.txSeq : 0;
+        if (txSeq > 0 && txSeq <= this.lastTxSeq) {
+          // Duplicate retried chunk — skip write to protect TLS/TCP stream integrity
+        } else {
+          try {
+            const writeBytes = body.dataZ
+              ? await gunzipBytes(base64ToBytes(body.dataZ))
+              : base64ToBytes(body.data);
+            if (writeBytes.length > 0) {
+              await this.writer.write(writeBytes);
+            }
+            if (txSeq > 0) this.lastTxSeq = txSeq;
+          } catch (_) {
+            return jsonResponse({ ok: false, error: "Invalid payload data" }, 400);
           }
-        } catch (_) {
-          return jsonResponse({ ok: false, error: "Invalid payload data" }, 400);
         }
       }
 
@@ -295,7 +302,7 @@ export class TunnelSessionDO extends DurableObject {
       const isClosed = this.closed && this.chunks.length === 0;
       const looksLikeTls = out.length >= 2 && out[0] >= 0x14 && out[0] <= 0x17 && out[1] === 0x03;
 
-      if (acceptGzip && !looksLikeTls && out.length > 512 && out.length <= 524288) {
+      if (acceptGzip && !looksLikeTls && out.length > 512 && out.length <= 1048576) {
         try {
           const gz = await gzipBytes(out);
           if (gz.length < out.length) {

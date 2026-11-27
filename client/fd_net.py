@@ -32,6 +32,7 @@ class BackendServer:
         self.name = name
         self.url = url.strip().rstrip("/")
         self.enabled = enabled
+        self.active = 0
         self.total_requests = 0
         self.errors = 0
         self.consecutive_failures = 0
@@ -65,7 +66,7 @@ class ServerPool:
     """
 
     def __init__(self):
-        self.lock = threading.Lock()
+        self.lock = threading.Condition()
         self.servers: list[BackendServer] = []
         self.server_mode: str = "priority"
 
@@ -99,6 +100,7 @@ class ServerPool:
                 if not grp:
                     return []
                 healthy = [s for s in grp if now >= s.cooldown_until]
+                healthy.sort(key=lambda s: (s.active, s.consecutive_failures, s.total_requests))
                 cooldown = sorted([s for s in grp if now < s.cooldown_until], key=lambda s: s.cooldown_until)
                 return healthy + cooldown
 
@@ -112,7 +114,7 @@ class ServerPool:
             cooldown = sorted([s for s in enabled if now < s.cooldown_until], key=lambda s: s.cooldown_until)
 
             if self.server_mode == "fair":
-                healthy.sort(key=lambda s: (s.consecutive_failures, s.total_requests))
+                healthy.sort(key=lambda s: (s.active, s.consecutive_failures, s.total_requests))
             return healthy + cooldown
 
     def get_keep_awake_targets(self, require_explicit: bool = False) -> list[BackendServer]:
@@ -130,6 +132,35 @@ class ServerPool:
                 pinned = [s for s in enabled if s.name == target_name]
                 return pinned if pinned else [enabled[0]]
             return [enabled[0]]
+
+    def max_concurrency_for(self, srv: BackendServer) -> int:
+        prov = detect_server_provider(srv)
+        if prov == "cloudflare":
+            return 120
+        if prov in ("render", "snapdeploy"):
+            return 48
+        return 64
+
+    def acquire_slot(self, srv: BackendServer | None, timeout: float = 8.0) -> bool:
+        if srv is None:
+            return True
+        limit = self.max_concurrency_for(srv)
+        deadline = time.time() + timeout
+        with self.lock:
+            while srv.active >= limit:
+                rem = deadline - time.time()
+                if rem <= 0:
+                    return False
+                self.lock.wait(timeout=min(rem, 0.15))
+            srv.active += 1
+            return True
+
+    def release_slot(self, srv: BackendServer | None):
+        if srv is None:
+            return
+        with self.lock:
+            srv.active = max(0, srv.active - 1)
+            self.lock.notify_all()
 
     def report_success(self, srv: BackendServer | None, latency_ms: int):
         if srv is None:
