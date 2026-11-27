@@ -309,15 +309,20 @@ class FreeDnetProxyServer:
         if self.route_mode == "direct":
             if backend is None:
                 return {"ok": False, "error": "No backend server configured for Direct mode", "upstreamError": True}
-            t0 = time.time()
-            res = post_direct_to_server(backend.url, payload, self.auth_key)
-            lat = int((time.time() - t0) * 1000)
-            if res.get("ok"):
-                self.server_pool.report_success(backend, lat)
+            if not self.server_pool.acquire_slot(backend, timeout=8.0):
+                return {"ok": False, "error": "Backend busy (concurrency limit)", "upstreamError": True}
+            try:
+                t0 = time.time()
+                res = post_direct_to_server(backend.url, payload, self.auth_key)
+                lat = int((time.time() - t0) * 1000)
+                if res.get("ok"):
+                    self.server_pool.report_success(backend, lat)
+                    return res
+                if res.get("upstreamError"):
+                    self.server_pool.report_failure(backend, res.get("error", "Upstream error"))
                 return res
-            if res.get("upstreamError"):
-                self.server_pool.report_failure(backend, res.get("error", "Upstream error"))
-            return res
+            finally:
+                self.server_pool.release_slot(backend)
 
         if backend is not None:
             payload["serverUrl"] = backend.url
@@ -331,6 +336,14 @@ class FreeDnetProxyServer:
             open_acquired = self._gas_open_sem.acquire(timeout=4.0)
             if not open_acquired:
                 return {"ok": False, "error": "GAS open queue busy (burst)"}
+
+        slot_acquired = False
+        if backend is not None:
+            slot_acquired = self.server_pool.acquire_slot(backend, timeout=8.0)
+            if not slot_acquired:
+                if open_acquired:
+                    self._gas_open_sem.release()
+                return {"ok": False, "error": "Backend busy (concurrency limit)", "upstreamError": True}
 
         eff_retries = retries
         if retries > 0:
@@ -381,6 +394,8 @@ class FreeDnetProxyServer:
 
             return {"ok": False, "error": last_err}
         finally:
+            if slot_acquired:
+                self.server_pool.release_slot(backend)
             if open_acquired:
                 self._gas_open_sem.release()
 
@@ -853,6 +868,7 @@ class FreeDnetProxyServer:
         last_activity = [time.time()]
 
         def tx_worker():
+            tx_seq = 0
             try:
                 client_sock.settimeout(15.0)
                 while self.running and not closed_evt.is_set():
@@ -884,7 +900,8 @@ class FreeDnetProxyServer:
                     last_activity[0] = time.time()
                     with self._stat_lock:
                         self.tx_bytes += len(outgoing)
-                    body = {"sessionId": session_id, "waitMs": 0, "txOnly": True, **self._encode_payload(outgoing)}
+                    tx_seq += 1
+                    body = {"sessionId": session_id, "waitMs": 0, "txOnly": True, "txSeq": tx_seq, **self._encode_payload(outgoing)}
                     res = self._send_request("sync", body, backend=pinned_backend, retries=1)
                     if not res.get("ok"):
                         closed_evt.set()
