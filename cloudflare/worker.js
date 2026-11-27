@@ -392,6 +392,77 @@ export default {
   async fetch(request, env) {
     const url = new URL(request.url);
 
+
+    if (request.method === "GET" && url.pathname === "/ws") {
+      if ((request.headers.get("upgrade") || "").toLowerCase() !== "websocket") {
+        return new Response("Expected Upgrade: websocket", { status: 426 });
+      }
+      const expectedKey = env.AUTH_KEY || "change-me-freednet-key";
+      const providedKey = request.headers.get("x-auth-key") || url.searchParams.get("authKey") || "";
+      if (String(providedKey) !== String(expectedKey)) {
+        return jsonResponse({ ok: false, error: "Unauthorized" }, 401);
+      }
+      const targetHost = (url.searchParams.get("host") || "").trim();
+      const targetPort = parseInt(url.searchParams.get("port") || "0", 10);
+      if (!targetHost || !Number.isInteger(targetPort) || targetPort < 1 || targetPort > 65535) {
+        return jsonResponse({ ok: false, error: "Invalid host or port" }, 400);
+      }
+
+      const pair = new WebSocketPair();
+      const [clientWs, serverWs] = Object.values(pair);
+      serverWs.accept();
+
+      (async () => {
+        const pending = [];
+        let writer = null;
+        let sock = null;
+        let wsClosed = false;
+
+        serverWs.addEventListener("message", async (evt) => {
+          const bytes = evt.data instanceof ArrayBuffer
+            ? new Uint8Array(evt.data)
+            : new TextEncoder().encode(String(evt.data || ""));
+          if (!bytes.length) return;
+          if (!writer) {
+            if (pending.length < 64) pending.push(bytes);
+            return;
+          }
+          try {
+            await writer.write(bytes);
+          } catch (_) {}
+        });
+
+        serverWs.addEventListener("close", () => {
+          wsClosed = true;
+          try { if (sock) sock.close(); } catch (_) {}
+        });
+
+        try {
+          sock = connect({ hostname: targetHost, port: targetPort });
+          await sock.opened;
+          writer = sock.writable.getWriter();
+          while (pending.length > 0 && !wsClosed) {
+            await writer.write(pending.shift());
+          }
+          const reader = sock.readable.getReader();
+          while (!wsClosed) {
+            const { value, done } = await reader.read();
+            if (done) break;
+            if (value && value.length > 0) {
+              serverWs.send(value);
+            }
+          }
+          try { serverWs.close(1000, "EOF"); } catch (_) {}
+        } catch (err) {
+          try { serverWs.close(1011, (err && err.message ? err.message : "Connect error").slice(0, 100)); } catch (_) {}
+        } finally {
+          try { if (sock) await sock.close(); } catch (_) {}
+        }
+      })();
+
+      return new Response(null, { status: 101, webSocket: clientWs });
+    }
+
     if (request.method === "GET" && (url.pathname === "/" || url.pathname === "/health")) {
       return jsonResponse({ ok: true, service: "FreeDnet-CF", ts: Date.now() });
     }

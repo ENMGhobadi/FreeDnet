@@ -499,6 +499,171 @@ const server = http.createServer(async (req, res) => {
   sendJson(res, 404, { ok: false, error: 'Not found' });
 });
 
+
+function wsEncodeFrame(opcode, payloadBuf) {
+  const len = payloadBuf ? payloadBuf.length : 0;
+  let hdr;
+  if (len < 126) {
+    hdr = Buffer.allocUnsafe(2);
+    hdr[0] = 0x80 | (opcode & 0x0f);
+    hdr[1] = len;
+  } else if (len < 65536) {
+    hdr = Buffer.allocUnsafe(4);
+    hdr[0] = 0x80 | (opcode & 0x0f);
+    hdr[1] = 126;
+    hdr.writeUInt16BE(len, 2);
+  } else {
+    hdr = Buffer.allocUnsafe(10);
+    hdr[0] = 0x80 | (opcode & 0x0f);
+    hdr[1] = 127;
+    hdr.writeBigUInt64BE(BigInt(len), 2);
+  }
+  return len > 0 ? Buffer.concat([hdr, payloadBuf]) : hdr;
+}
+
+server.on('upgrade', (req, clientSocket, head) => {
+  try {
+    const u = new URL(req.url, 'http://localhost');
+    if (u.pathname !== '/ws') {
+      clientSocket.write('HTTP/1.1 404 Not Found\r\nConnection: close\r\n\r\n');
+      return clientSocket.destroy();
+    }
+    const providedKey = req.headers['x-auth-key'] || u.searchParams.get('authKey') || '';
+    if (!safeEqual(String(providedKey), AUTH_KEY)) {
+      clientSocket.write('HTTP/1.1 401 Unauthorized\r\nConnection: close\r\n\r\n');
+      return clientSocket.destroy();
+    }
+    const targetHost = String(u.searchParams.get('host') || '').trim();
+    const targetPort = parseInt(u.searchParams.get('port') || '0', 10);
+    if (!targetHost || !Number.isInteger(targetPort) || targetPort < 1 || targetPort > 65535) {
+      clientSocket.write('HTTP/1.1 400 Bad Request\r\nConnection: close\r\n\r\n');
+      return clientSocket.destroy();
+    }
+    const wsKey = req.headers['sec-websocket-key'];
+    if (!wsKey) {
+      clientSocket.write('HTTP/1.1 400 Bad Request\r\nConnection: close\r\n\r\n');
+      return clientSocket.destroy();
+    }
+
+    const family = net.isIP(targetHost) === 6 ? 6 : 4;
+    const targetSock = net.createConnection({ host: targetHost, port: targetPort, family });
+    targetSock.setNoDelay(true);
+    clientSocket.setNoDelay(true);
+
+    let upgraded = false;
+    let wsBuf = head && head.length ? Buffer.from(head) : Buffer.alloc(0);
+    let closed = false;
+
+    const cleanup = () => {
+      if (closed) return;
+      closed = true;
+      try { targetSock.destroy(); } catch (_) {}
+      try { clientSocket.destroy(); } catch (_) {}
+    };
+
+    const connectTimer = setTimeout(() => {
+      if (!upgraded) {
+        try { clientSocket.write('HTTP/1.1 504 Gateway Timeout\r\nConnection: close\r\n\r\n'); } catch (_) {}
+        cleanup();
+      }
+    }, 15000);
+
+    const processWsFrames = () => {
+      while (wsBuf.length >= 2) {
+        const b0 = wsBuf[0];
+        const b1 = wsBuf[1];
+        const opcode = b0 & 0x0f;
+        const masked = (b1 & 0x80) !== 0;
+        let payloadLen = b1 & 0x7f;
+        let offset = 2;
+        if (payloadLen === 126) {
+          if (wsBuf.length < 4) return;
+          payloadLen = wsBuf.readUInt16BE(2);
+          offset = 4;
+        } else if (payloadLen === 127) {
+          if (wsBuf.length < 10) return;
+          payloadLen = Number(wsBuf.readBigUInt64BE(2));
+          offset = 10;
+        }
+        const maskLen = masked ? 4 : 0;
+        if (wsBuf.length < offset + maskLen + payloadLen) return;
+        const maskKey = masked ? wsBuf.subarray(offset, offset + 4) : null;
+        offset += maskLen;
+        const payload = Buffer.from(wsBuf.subarray(offset, offset + payloadLen));
+        wsBuf = wsBuf.subarray(offset + payloadLen);
+        if (masked && maskKey) {
+          for (let i = 0; i < payload.length; i++) {
+            payload[i] ^= maskKey[i & 3];
+          }
+        }
+        if (opcode === 0x8) {
+          try { clientSocket.write(wsEncodeFrame(0x8, Buffer.alloc(0))); } catch (_) {}
+          return cleanup();
+        }
+        if (opcode === 0x9) {
+          try { clientSocket.write(wsEncodeFrame(0xA, payload)); } catch (_) {}
+          continue;
+        }
+        if ((opcode === 0x2 || opcode === 0x1 || opcode === 0x0) && payload.length > 0) {
+          if (!targetSock.destroyed) targetSock.write(payload);
+        }
+      }
+    };
+
+    targetSock.on('connect', () => {
+      clearTimeout(connectTimer);
+      upgraded = true;
+      const accept = crypto
+        .createHash('sha1')
+        .update(String(wsKey) + '258EAFA5-E914-47DA-95CA-C5AB0DC85B11')
+        .digest('base64');
+      clientSocket.write(
+        'HTTP/1.1 101 Switching Protocols\r\n' +
+        'Upgrade: websocket\r\n' +
+        'Connection: Upgrade\r\n' +
+        `Sec-WebSocket-Accept: ${accept}\r\n\r\n`
+      );
+      if (wsBuf.length > 0) processWsFrames();
+    });
+
+    clientSocket.on('data', (chunk) => {
+      wsBuf = wsBuf.length ? Buffer.concat([wsBuf, chunk]) : chunk;
+      if (upgraded) processWsFrames();
+    });
+
+    targetSock.on('data', (chunk) => {
+      if (!upgraded || closed) return;
+      try {
+        const ok = clientSocket.write(wsEncodeFrame(0x2, chunk));
+        if (!ok) targetSock.pause();
+      } catch (_) {
+        cleanup();
+      }
+    });
+
+    clientSocket.on('drain', () => {
+      if (!closed && !targetSock.destroyed) targetSock.resume();
+    });
+
+    targetSock.on('end', () => {
+      if (upgraded && !closed) {
+        try { clientSocket.end(wsEncodeFrame(0x8, Buffer.alloc(0))); } catch (_) {}
+      }
+      cleanup();
+    });
+    targetSock.on('error', () => {
+      if (!upgraded) {
+        try { clientSocket.write('HTTP/1.1 502 Bad Gateway\r\nConnection: close\r\n\r\n'); } catch (_) {}
+      }
+      cleanup();
+    });
+    clientSocket.on('error', cleanup);
+    clientSocket.on('close', cleanup);
+  } catch (_) {
+    try { clientSocket.destroy(); } catch (__) {}
+  }
+});
+
 server.keepAliveTimeout = 60000;
 server.headersTimeout = 65000;
 
