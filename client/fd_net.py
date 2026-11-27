@@ -27,6 +27,25 @@ def detect_server_provider(srv: "BackendServer") -> str:
     return "custom"
 
 
+def compute_auto_profile(n_gas: int, n_cf: int, n_render: int, n_snap: int, n_custom: int = 0) -> dict:
+    """Compute optimal GAS & Backend settings based on active account/server counts."""
+    n_srv = n_cf + n_render + n_snap + n_custom
+    if n_gas >= 4:
+        conc, daily, rpm = 18, 16000, 140
+    elif n_gas >= 2:
+        conc, daily, rpm = 22, 18000, 180
+    else:
+        conc, daily, rpm = 26, 19000, 210
+    gas_mode = "fair" if n_gas >= 2 else "priority"
+    server_mode = "fair" if n_srv >= 2 else "priority"
+    return {
+        "max_concurrent": conc,
+        "daily_limit": daily,
+        "max_rpm": rpm,
+        "gas_mode": gas_mode,
+        "server_mode": server_mode,
+    }
+
 class BackendServer:
     def __init__(self, name: str, url: str, enabled: bool = True, deploy_meta: dict | None = None):
         self.name = name
@@ -118,7 +137,7 @@ class ServerPool:
             healthy = [s for s in enabled if now >= s.cooldown_until]
             cooldown = sorted([s for s in enabled if now < s.cooldown_until], key=lambda s: s.cooldown_until)
 
-            if self.server_mode == "fair":
+            if self.server_mode in ("fair", "auto"):
                 healthy.sort(key=lambda s: (s.active, s.consecutive_failures, s.total_requests))
             return healthy + cooldown
 
@@ -127,6 +146,9 @@ class ServerPool:
             enabled = [s for s in self.servers if s.enabled and s.url]
             if not enabled:
                 return []
+            if self.server_mode == "auto":
+                # Cloudflare Workers never sleep; only keep-awake Render/SnapDeploy/custom servers
+                return [s for s in enabled if detect_server_provider(s) != "cloudflare"]
             if self.server_mode == "fair":
                 return list(enabled)
             if self.server_mode.startswith("provider:"):
@@ -137,6 +159,7 @@ class ServerPool:
                 pinned = [s for s in enabled if s.name == target_name]
                 return pinned if pinned else [enabled[0]]
             return [enabled[0]]
+
 
     def max_concurrency_for(self, srv: BackendServer) -> int:
         prov = detect_server_provider(srv)
@@ -446,10 +469,10 @@ class KeepAlivePool:
                 pass
         if chosen is not None:
             chosen.timeout = timeout
-            return chosen
+            return chosen, True
         if scheme == "https":
-            return http.client.HTTPSConnection(host, port, timeout=timeout, context=self._ssl_ctx)
-        return http.client.HTTPConnection(host, port, timeout=timeout)
+            return http.client.HTTPSConnection(host, port, timeout=timeout, context=self._ssl_ctx), False
+        return http.client.HTTPConnection(host, port, timeout=timeout), False
 
     def _release(self, scheme: str, host: str, port: int, conn):
         key = (scheme, host, port)
@@ -474,7 +497,7 @@ class KeepAlivePool:
             path = f"{path}?{parsed.query}"
 
         for attempt in range(2):
-            conn = self._acquire(scheme, host, port, timeout)
+            conn, is_reused = self._acquire(scheme, host, port, timeout)
             try:
                 req_headers = {**headers, "Connection": "keep-alive"}
                 if body_bytes is not None and method == "POST":
@@ -501,7 +524,7 @@ class KeepAlivePool:
                     conn.close()
                 except Exception:
                     pass
-                if attempt == 0:
+                if attempt == 0 and (is_reused or method != "POST"):
                     continue
                 raise
 

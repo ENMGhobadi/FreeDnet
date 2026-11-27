@@ -13,6 +13,7 @@ import subprocess
 import sys
 import threading
 import time
+import uuid
 
 from fd_config import BASE_DIR
 from fd_net import (
@@ -372,7 +373,8 @@ class FreeDnetProxyServer:
 
                 last_err = res.get("error", "GAS error")
                 is_target_err = bool(res.get("targetError"))
-                if is_target_err:
+                is_session_err = bool(res.get("sessionError")) or ("Session not found" in last_err) or (res.get("statusCode") in (400, 404))
+                if is_target_err or is_session_err:
                     self.pool.release(acc, ok=True, latency_ms=lat)
                     self.server_pool.report_success(backend, lat)
                     return res
@@ -389,8 +391,6 @@ class FreeDnetProxyServer:
                         self._last_rl_log = now_rl
                         self.log(f"GAS Rate-Limit [{acc.name}]: {last_err} (entering cooldown)")
                 excluded.add(acc)
-                if not rate_limited and "Session not found" in last_err:
-                    break
 
             return {"ok": False, "error": last_err}
         finally:
@@ -400,6 +400,8 @@ class FreeDnetProxyServer:
                 self._gas_open_sem.release()
 
     def _http_fetch_with_failover(self, url: str, method: str, headers: dict, req_body: bytes) -> dict:
+        if req_body and len(req_body) > 2_800_000:
+            return {"ok": False, "status": 413, "error": "Request body exceeds 2.8 MB MITM relay limit"}
         candidates = self.server_pool.get_candidates(require_explicit=(self.route_mode == "direct"))
         if not candidates:
             return {"ok": False, "error": "No enabled backend servers available"}
@@ -596,9 +598,10 @@ class FreeDnetProxyServer:
 
         last_res = {"ok": False, "error": "No backend servers available"}
         for srv in candidates:
+            open_id = uuid.uuid4().hex
             res = self._send_request(
                 "open",
-                {"targetHost": host, "targetPort": port, "data": init_b64},
+                {"targetHost": host, "targetPort": port, "data": init_b64, "clientOpenId": open_id},
                 backend=srv,
                 retries=1,
             )
@@ -606,7 +609,7 @@ class FreeDnetProxyServer:
                 return res, srv
             last_res = res
             if srv is not None and len(candidates) > 1 and res.get("upstreamError"):
-                detail = f" ({res.get('detail', '')[:80]})" if res.get("detail") else ""
+                detail = f" ({res.get('detail', '')[:80]})" if res.get('detail') else ""
                 self.log(f"Backend [{srv.name}] failed ({res.get('error')}{detail}), failing over...")
                 continue
             if not res.get("upstreamError"):
@@ -727,17 +730,20 @@ class FreeDnetProxyServer:
             elif is_http_connect:
                 client_sock.sendall(b"HTTP/1.1 200 Connection Established\r\n\r\n")
 
+            init_rx_ack = 0
             if open_res.get("data"):
                 raw_out = base64.b64decode(open_res["data"])
                 if raw_out:
                     client_sock.sendall(raw_out)
                     with self._stat_lock:
                         self.rx_bytes += len(raw_out)
+                    if isinstance(open_res.get("rxSeq"), int) and open_res["rxSeq"] > 0:
+                        init_rx_ack = open_res["rxSeq"]
 
             if open_res.get("closed"):
                 return
 
-            self._relay_loop(client_sock, session_id, pinned_backend)
+            self._relay_loop(client_sock, session_id, pinned_backend, initial_rx_ack=init_rx_ack)
         except Exception:
             pass
         finally:
@@ -863,7 +869,7 @@ class FreeDnetProxyServer:
             return base64.b64decode(res["data"])
         return b""
 
-    def _relay_loop(self, client_sock: socket.socket, session_id: str, pinned_backend: BackendServer | None):
+    def _relay_loop(self, client_sock: socket.socket, session_id: str, pinned_backend: BackendServer | None, initial_rx_ack: int = 0):
         closed_evt = threading.Event()
         last_activity = [time.time()]
 
@@ -879,7 +885,11 @@ class FreeDnetProxyServer:
                     try:
                         chunk = client_sock.recv(65536)
                         if not chunk:
-                            closed_evt.set()
+                            # Local write half-close (FIN): propagate FIN to backend without aborting RX drain
+                            try:
+                                self._send_request("sync", {"sessionId": session_id, "waitMs": 0, "txOnly": True, "txFin": True}, backend=pinned_backend, retries=0)
+                            except Exception:
+                                pass
                             return
                         outgoing = chunk
                         while len(outgoing) < 262144:
@@ -891,7 +901,6 @@ class FreeDnetProxyServer:
                                 break
                             outgoing += more
                     except OSError:
-                        closed_evt.set()
                         return
 
                     if not outgoing:
@@ -906,18 +915,8 @@ class FreeDnetProxyServer:
                     if not res.get("ok"):
                         closed_evt.set()
                         return
-                    extra_rx = self._decode_payload(res)
-                    if extra_rx:
-                        last_activity[0] = time.time()
-                        try:
-                            client_sock.sendall(extra_rx)
-                            with self._stat_lock:
-                                self.rx_bytes += len(extra_rx)
-                        except OSError:
-                            closed_evt.set()
-                            return
                     if res.get("closed"):
-                        closed_evt.set()
+                        # Backend already drained & closed; stop TX and let rx_loop exit cleanly
                         return
             except Exception:
                 closed_evt.set()
@@ -925,6 +924,7 @@ class FreeDnetProxyServer:
         tx_thread = threading.Thread(target=tx_worker, daemon=True)
         tx_thread.start()
 
+        rx_ack = initial_rx_ack
         prev_had_rx = False
         idle_cycles = 0
         try:
@@ -942,7 +942,7 @@ class FreeDnetProxyServer:
 
                 res = self._send_request(
                     "sync",
-                    {"sessionId": session_id, "waitMs": wait_ms, "acceptGzip": True},
+                    {"sessionId": session_id, "waitMs": wait_ms, "acceptGzip": True, "ackSeq": rx_ack},
                     backend=pinned_backend,
                     retries=1,
                 )
@@ -950,14 +950,18 @@ class FreeDnetProxyServer:
                     return
 
                 raw_out = self._decode_payload(res)
+                rx_seq = res.get("rxSeq")
+                is_dup = isinstance(rx_seq, int) and rx_seq > 0 and rx_seq <= rx_ack
                 prev_had_rx = len(raw_out) > 0
-                if raw_out:
+                if raw_out and not is_dup:
                     idle_cycles = 0
                     last_activity[0] = time.time()
                     try:
                         client_sock.sendall(raw_out)
                         with self._stat_lock:
                             self.rx_bytes += len(raw_out)
+                        if isinstance(rx_seq, int) and rx_seq > 0:
+                            rx_ack = rx_seq
                     except OSError:
                         return
 
