@@ -89,6 +89,7 @@ from fd_net import (
     GasAccount,
     GasAccountPool,
     ServerPool,
+    detect_server_provider,
     _DIRECT_OPENER,
     post_direct_to_server,
     post_to_gas,
@@ -508,7 +509,7 @@ class FreeDnetProWindow(QMainWindow):
         st_lay.addWidget(self.lbl_backend_mode)
         self.target_combo = QComboBox()
         self.target_combo.setMinimumWidth(250)
-        self.target_combo.currentTextChanged.connect(self._on_target_change)
+        self.target_combo.currentIndexChanged.connect(self._on_target_change)
         st_lay.addWidget(self.target_combo)
         st_lay.addSpacing(4)
         self.app_routing_btn = QPushButton("🔀 App Routing")
@@ -867,16 +868,31 @@ class FreeDnetProWindow(QMainWindow):
     def _refresh_target_dropdown(self):
         self.target_combo.blockSignals(True)
         self.target_combo.clear()
-        options = [self.SRV_PRIORITY_LBL, self.SRV_FAIR_LBL] + [f"Only: {s.name}" for s in self.server_pool.servers]
-        self.target_combo.addItems(options)
+        srvs = self.server_pool.servers
+        cnt_render = sum(1 for s in srvs if s.enabled and detect_server_provider(s) == "render")
+        cnt_cf = sum(1 for s in srvs if s.enabled and detect_server_provider(s) == "cloudflare")
+        cnt_snap = sum(1 for s in srvs if s.enabled and detect_server_provider(s) == "snapdeploy")
+
+        items = [
+            (self.SRV_PRIORITY_LBL, "priority"),
+            (self.SRV_FAIR_LBL, "fair"),
+            (f"Only Render ({cnt_render})", "provider:render"),
+            (f"Only Cloudflare ({cnt_cf})", "provider:cloudflare"),
+            (f"Only SnapDeploy ({cnt_snap})", "provider:snapdeploy"),
+        ]
+        for s in srvs:
+            items.append((f"Only: {s.name}", f"only:{s.name}"))
+
+        for lbl, data_val in items:
+            self.target_combo.addItem(lbl, data_val)
+
         mode = self.server_pool.server_mode
-        if mode == "fair":
-            self.target_combo.setCurrentText(self.SRV_FAIR_LBL)
-        elif mode.startswith("only:") and f"Only: {mode[5:]}" in options:
-            self.target_combo.setCurrentText(f"Only: {mode[5:]}")
+        idx = self.target_combo.findData(mode)
+        if idx >= 0:
+            self.target_combo.setCurrentIndex(idx)
         else:
             self.server_pool.set_mode("priority")
-            self.target_combo.setCurrentText(self.SRV_PRIORITY_LBL)
+            self.target_combo.setCurrentIndex(0)
         self.target_combo.blockSignals(False)
 
     def _refresh_app_routing_btn(self):
@@ -913,17 +929,16 @@ class FreeDnetProWindow(QMainWindow):
                 self._stop_tun_process()
                 self.toggle_tun_mode()
 
-    def _on_target_change(self, val: str):
-        if not val:
+    def _on_target_change(self, idx: int):
+        if idx < 0:
             return
-        if val == self.SRV_PRIORITY_LBL:
-            self.server_pool.set_mode("priority")
-        elif val == self.SRV_FAIR_LBL:
-            self.server_pool.set_mode("fair")
-        elif val.startswith("Only: "):
-            self.server_pool.set_mode(f"only:{val[6:]}")
+        mode_val = self.target_combo.itemData(idx)
+        lbl = self.target_combo.itemText(idx)
+        if not mode_val:
+            return
+        self.server_pool.set_mode(str(mode_val))
         self._save_config()
-        self.log(f"Backend Mode set to: {val}")
+        self.log(f"Backend Mode set to: {lbl}")
 
     def _on_gas_mode_change(self, checked: bool):
         gmode = "fair" if checked else "priority"
@@ -1496,6 +1511,7 @@ class FreeDnetProWindow(QMainWindow):
             srv.enabled = not srv.enabled
             srv.cooldown_until = 0
             srv.consecutive_failures = 0
+            self._refresh_target_dropdown()
             self._save_config()
             self._sync_tables()
 
