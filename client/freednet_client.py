@@ -90,6 +90,7 @@ from fd_net import (
     GasAccount,
     GasAccountPool,
     ServerPool,
+    compute_auto_profile,
     detect_server_provider,
     _DIRECT_OPENER,
     post_direct_to_server,
@@ -880,6 +881,7 @@ class FreeDnetProWindow(QMainWindow):
         cnt_snap = sum(1 for s in srvs if s.enabled and detect_server_provider(s) == "snapdeploy")
 
         items = [
+            (self._t("auto_mode_lbl"), "auto"),
             (self.SRV_PRIORITY_LBL, "priority"),
             (self.SRV_FAIR_LBL, "fair"),
             (f"Only Render ({cnt_render})", "provider:render"),
@@ -935,6 +937,22 @@ class FreeDnetProWindow(QMainWindow):
                 self._stop_tun_process()
                 self.toggle_tun_mode()
 
+    def _apply_auto_tuning(self, log_it: bool = True):
+        n_gas = sum(1 for a in self.pool.accounts if a.enabled and a.url)
+        srvs = [s for s in self.server_pool.servers if s.enabled and s.url]
+        n_cf = sum(1 for s in srvs if detect_server_provider(s) == "cloudflare")
+        n_r = sum(1 for s in srvs if detect_server_provider(s) == "render")
+        n_s = sum(1 for s in srvs if detect_server_provider(s) == "snapdeploy")
+        n_c = sum(1 for s in srvs if detect_server_provider(s) == "custom")
+        prof = compute_auto_profile(n_gas, n_cf, n_r, n_s, n_c)
+        gmode = prof["gas_mode"] if self.preset_combo.currentText() == "Auto (Standard Adaptive)" else None
+        self.pool.update_limits(prof["max_concurrent"], prof["daily_limit"], prof["max_rpm"], gas_mode=gmode)
+        if log_it:
+            self.log(
+                f"Auto Standard tuned: {n_gas} GAS ({prof['max_concurrent']} conc / {prof['max_rpm']} rpm, {prof['gas_mode']}) "
+                f"-> {n_r} Render, {n_cf} CF, {n_s} SnapDeploy ({self.server_pool.server_mode})"
+            )
+
     def _on_target_change(self, idx: int):
         if idx < 0:
             return
@@ -943,17 +961,26 @@ class FreeDnetProWindow(QMainWindow):
         if not mode_val:
             return
         self.server_pool.set_mode(str(mode_val))
+        if str(mode_val) == "auto" or self.preset_combo.currentText() == "Auto (Standard Adaptive)":
+            self._apply_auto_tuning(log_it=True)
         self._save_config()
         self.log(f"Backend Mode set to: {lbl}")
 
     def _on_gas_mode_change(self, checked: bool):
         gmode = "fair" if checked else "priority"
-        conc, daily, rpm = GAS_QUOTA_PRESETS.get(self.preset_combo.currentText(), (18, 14000, 120))
-        self.pool.update_limits(conc, daily, rpm, gas_mode=gmode)
+        if self.preset_combo.currentText() == "Auto (Standard Adaptive)" or self.server_pool.server_mode == "auto":
+            self._apply_auto_tuning(log_it=True)
+        else:
+            conc, daily, rpm = GAS_QUOTA_PRESETS.get(self.preset_combo.currentText(), (18, 14000, 120))
+            self.pool.update_limits(conc, daily, rpm, gas_mode=gmode)
         self._save_config()
         self.log(f"GAS Quota Distribution: {'Fair-Share (1/N Equal)' if checked else 'Priority (#1 -> #2 Failover)'}")
 
     def _on_preset_change(self, preset: str):
+        if preset == "Auto (Standard Adaptive)":
+            self._apply_auto_tuning(log_it=True)
+            self._save_config()
+            return
         if preset in GAS_QUOTA_PRESETS:
             conc, daily, rpm = GAS_QUOTA_PRESETS[preset]
             self.pool.update_limits(conc, daily, rpm)
@@ -1045,6 +1072,7 @@ class FreeDnetProWindow(QMainWindow):
         self.gas_table.setHorizontalHeaderLabels(self._t("gas_headers"))
 
         self.lbl_backend_mode.setText(self._t("backend_mode"))
+        self._refresh_target_dropdown()
         self._refresh_app_routing_btn()
         self.deploy_render_btn.setText(self._t("deploy_render"))
         self.deploy_snap_btn.setText(self._t("deploy_snap"))
@@ -1953,8 +1981,12 @@ class FreeDnetProWindow(QMainWindow):
             return
 
         self._save_config()
-        conc, daily, rpm = GAS_QUOTA_PRESETS.get(self.preset_combo.currentText(), (18, 14000, 120))
-        self.pool.update_limits(conc, daily, rpm, gas_mode=("fair" if self.chk_fair_share.isChecked() else "priority"))
+        gmode = "fair" if self.chk_fair_share.isChecked() else "priority"
+        if self.preset_combo.currentText() == "Auto (Standard Adaptive)" or self.server_pool.server_mode == "auto":
+            self._apply_auto_tuning(log_it=True)
+        else:
+            conc, daily, rpm = GAS_QUOTA_PRESETS.get(self.preset_combo.currentText(), (18, 14000, 120))
+            self.pool.update_limits(conc, daily, rpm, gas_mode=gmode)
         try:
             pmode = "mitm" if self.rb_mitm.isChecked() else "tcp"
             if pmode == "mitm":
